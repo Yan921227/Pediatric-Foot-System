@@ -1,31 +1,41 @@
 #!/usr/bin/env python
-# tiptoe_from_video_simple_cfg.py
+# tiptoe_from_video_3d.py
 # -----------------------------------------------------------
-# 功能：以 Mediapipe Pose 偵測「踮腳尖走路（Tip-Toe Walking, TTW）」
+# 功能：以 Mediapipe Pose 3D 座標偵測「踮腳尖走路（TTW）」
 # 作者：Yen 的 AI 助手（2025.07）
 # -----------------------------------------------------------
 
 # ========= ① 這裡改路徑即可 =========
 VIDEO_PATH      = "C:\\Users\\User\\Desktop\\幼童_踮腳尖走路.mp4"
-SAVE_ANNOTATION = True      # False → 僅輸出 JSON，不存標註影片
+SAVE_ANNOTATION = True          # False → 僅輸出 JSON，不存標註影片
+USE_3D          = True          # True → 用 3D 關節角；False → 回到 2D
 # ====================================
 
 import cv2, mediapipe as mp, numpy as np, json, time, pathlib
 from collections import deque
 
 # ======== 可調參數 ========
-PF_THRESHOLD_DEG     = 5.0   # 踝關節 > 5° 蹠屈 ⇒ 無 heel-strike
+PF_THRESHOLD_DEG     = 8.0   # 3D 角度臨界值（2D 建議 5.0）
 EARLY_RISE_PERCENT   = 0.30  # < 30 % gait cycle heel-rise ⇒ 異常
 FRAME_RATIO_FLAG     = 0.50  # 全片 > 50 % 影格被標 TTW ⇒ 整段踮腳
 WIN_SMOOTH_ANGLE     = 7     # 角度移動平均視窗(影格)
 WIN_SMOOTH_ANKLE_Y   = 7     # 踝 y 移動平均視窗(影格)
-FONT                = cv2.FONT_HERSHEY_SIMPLEX
+FONT = cv2.FONT_HERSHEY_SIMPLEX
 # =========================
 
-def angle(p1, p2, p3):
-    """回傳 ∠p1-p2-p3（度），p = (x, y)。"""
+def angle2d(p1, p2, p3):
+    """2D ∠p1-p2-p3（度）"""
     a, b, c = map(np.array, (p1, p2, p3))
-    cosv = np.dot(a - b, c - b) / (np.linalg.norm(a - b) * np.linalg.norm(c - b) + 1e-6)
+    cosv = np.dot(a-b, c-b) / (np.linalg.norm(a-b)*np.linalg.norm(c-b) + 1e-6)
+    return np.degrees(np.arccos(np.clip(cosv, -1, 1)))
+
+def angle3d(p1, p2, p3):
+    """3D ∠p1-p2-p3（度）"""
+    return angle2d(p1, p2, p3) if not USE_3D else _angle3d_inner(p1, p2, p3)
+
+def _angle3d_inner(p1, p2, p3):
+    a, b, c = map(np.array, (p1, p2, p3))
+    cosv = np.dot(a-b, c-b) / (np.linalg.norm(a-b)*np.linalg.norm(c-b) + 1e-6)
     return np.degrees(np.arccos(np.clip(cosv, -1, 1)))
 
 def moving_avg(q: deque, val: float):
@@ -33,8 +43,10 @@ def moving_avg(q: deque, val: float):
     return sum(q) / len(q)
 
 def detect_tiptoe(video_path: pathlib.Path, save_video: bool):
-    pose = mp.solutions.pose.Pose(model_complexity=1, smooth_landmarks=True,
-                                  min_detection_confidence=0.5, min_tracking_confidence=0.5)
+    pose = mp.solutions.pose.Pose(
+        model_complexity=1, smooth_landmarks=True,
+        min_detection_confidence=0.5, min_tracking_confidence=0.5
+    )
 
     cap = cv2.VideoCapture(str(video_path))
     fps, w, h = (cap.get(cv2.CAP_PROP_FPS) or 30,
@@ -46,8 +58,7 @@ def detect_tiptoe(video_path: pathlib.Path, save_video: bool):
         writer   = cv2.VideoWriter(str(out_path),
                                    cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
-    q_angle  = deque(maxlen=WIN_SMOOTH_ANGLE)
-    q_ankleY = deque(maxlen=WIN_SMOOTH_ANKLE_Y)
+    q_angle, q_ankleY = deque(maxlen=WIN_SMOOTH_ANGLE), deque(maxlen=WIN_SMOOTH_ANKLE_Y)
     flags, heel_rise_events = [], 0
     gait_start, prev_ankle_y, idx = None, None, 0
     t0 = time.time()
@@ -61,23 +72,37 @@ def detect_tiptoe(video_path: pathlib.Path, save_video: bool):
         is_tiptoe = False
 
         if res.pose_landmarks:
-            lm = res.pose_landmarks.landmark
-            RK, RA, RH, RT = lm[26], lm[28], lm[30], lm[32]  # 右膝踝踵趾
+            lm2d = res.pose_landmarks.landmark
+            RK2, RA2, RH2, RT2 = lm2d[26], lm2d[28], lm2d[30], lm2d[32]
 
-            ang  = angle((RK.x*w, RK.y*h), (RA.x*w, RA.y*h), (RT.x*w, RT.y*h))
-            angS = moving_avg(q_angle, ang)
+            # ------- 角度計算 -------
+            if USE_3D and res.pose_world_landmarks:
+                world = res.pose_world_landmarks.landmark
+                RK, RA, RT = world[26], world[28], world[32]
+                ang_raw = angle3d((RK.x, RK.y, RK.z),
+                                  (RA.x, RA.y, RA.z),
+                                  (RT.x, RT.y, RT.z))
+            else:  # 回退 2D
+                ang_raw = angle2d((RK2.x*w, RK2.y*h),
+                                  (RA2.x*w, RA2.y*h),
+                                  (RT2.x*w, RT2.y*h))
 
-            q_ankleY.append(RA.y)
-            ankleS = sum(q_ankleY)/len(q_ankleY)
+            ang_sm = moving_avg(q_angle, ang_raw)
 
-            if angS > PF_THRESHOLD_DEG and RT.y < RH.y:
+            # ------- 踝 y 平滑 -------
+            q_ankleY.append(RA2.y)
+            ankle_sm = sum(q_ankleY) / len(q_ankleY)
+
+            # ------- 判斷踮腳 -------
+            toe_higher = RT2.y < RH2.y
+            if ang_sm > PF_THRESHOLD_DEG and toe_higher:
                 is_tiptoe = True
                 if save_video:
                     cv2.putText(frame, "TIPTOE", (50, 60), FONT, 1.8, (0, 0, 255), 3)
 
-            # heel-rise 早期事件偵測
+            # ------- early heel-rise -------
             if prev_ankle_y is not None:
-                delta = ankleS - prev_ankle_y
+                delta = ankle_sm - prev_ankle_y
                 if delta > 0 and gait_start is None:     # ankle 開始下降
                     gait_start = idx
                 if delta < 0 and gait_start is not None: # ankle 上升 → heel-rise
@@ -85,10 +110,10 @@ def detect_tiptoe(video_path: pathlib.Path, save_video: bool):
                     if pct < EARLY_RISE_PERCENT:
                         heel_rise_events += 1
                         if save_video:
-                            cv2.putText(frame, "EARLY HEEL RISE", (50, 120),
-                                        FONT, 1.2, (255, 0, 0), 2)
+                            cv2.putText(frame, "EARLY HEEL RISE",
+                                        (50, 120), FONT, 1.2, (255, 0, 0), 2)
                     gait_start = None
-            prev_ankle_y = ankleS
+            prev_ankle_y = ankle_sm
 
         flags.append(is_tiptoe)
         if save_video:
@@ -100,7 +125,7 @@ def detect_tiptoe(video_path: pathlib.Path, save_video: bool):
         writer.release()
     pose.close()
 
-    ratio = float(np.mean(flags))
+    ratio = float(np.mean(flags)) if flags else 0.0
     report = {
         "video": str(video_path),
         "fps": fps,

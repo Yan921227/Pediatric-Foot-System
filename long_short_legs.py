@@ -1,116 +1,192 @@
+
+#!/usr/bin/env python
+# leg_length_discrepancy_annotator.py
 """
-leg_length_discrepancy_detector.py
----------------------------------
-偵測影片中長短腳 (Leg-Length Discrepancy, LLD)
-依賴: mediapipe >=0.10, opencv-python, numpy, scipy, pandas, tqdm
+以 MediaPipe Pose 偵測影片中的長短腳 (Leg-Length Discrepancy, LLD)。
+偵測到時在畫面標註並輸出 *_annotated.mp4；同時輸出逐幀 CSV。
+依賴：mediapipe >= 0.10, opencv-python, numpy, scipy, pandas, tqdm
 """
 
-import cv2
-import mediapipe as mp
-import numpy as np
-import pandas as pd
+import cv2, mediapipe as mp, numpy as np, pandas as pd
 from scipy.signal import savgol_filter
 from tqdm import tqdm
-import argparse, os, sys
+import argparse, os, sys, textwrap
 
-# ========== 預設參數，可自行修改 ==========
-DEFAULT_VIDEO   = "C:\\Users\\User\\Desktop\\0717.mp4"   # 若 CLI 沒傳 --video 就用這支
-DEFAULT_SMOOTH  = "sg"       # sg / ema
-DEFAULT_LEN_TH  = 0.03       # 腿長差判斷閾值 (比例)
-DEFAULT_PEL_TH  = 0.05       # 骨盆傾斜判斷閾值 (比例)
-# ==========================================
+# ---------- 預設 ----------
+DEFAULT_VIDEO   = "C:\\Users\\User\\Desktop\\0717.mp4"
+DEFAULT_SMOOTH  = "sg"            # sg / ema
+DEFAULT_LEN_TH  = 0.03            # 腿長差判斷閾值 (比例)
+DEFAULT_PEL_TH  = 0.05            # 骨盆傾斜判斷閾值 (比例)
+# -------------------------
 
-# ---------- 關鍵點索引 ----------
 POSE = mp.solutions.pose.PoseLandmark
-L_HIP, R_HIP = POSE.LEFT_HIP.value,  POSE.RIGHT_HIP.value
+L_HIP, R_HIP = POSE.LEFT_HIP.value,   POSE.RIGHT_HIP.value
 L_ANK, R_ANK = POSE.LEFT_ANKLE.value, POSE.RIGHT_ANKLE.value
 
-# ---------- 工具函式 ----------
+# ---------- 工具 ----------
 def euclidean(p1, p2):
     return np.linalg.norm(np.array(p1[:2]) - np.array(p2[:2]))
 
 def smooth_series(arr, method, **kw):
+    """回傳 NumPy array；不足長度時原樣返回"""
     if method == "ema":
         alpha = kw.get("alpha", 0.3)
         out = []
         for x in arr:
             out.append(x if not out else alpha * x + (1 - alpha) * out[-1])
-        return np.array(out)
-    # default = Savitzky‑Golay
-    win = kw.get("window", 11); poly = kw.get("poly", 2)
-    if len(arr) < win: return np.array(arr)
+        return np.asarray(out, dtype=float)
+
+    win = kw.get("window", 11)
+    poly = kw.get("poly", 2)
+    if len(arr) < win:
+        return np.asarray(arr, dtype=float)
     return savgol_filter(arr, window_length=win, polyorder=poly)
 
+def put_multiline(img, text, origin, *, font_scale=0.75,
+                  thickness=2, color=(0,0,255)):
+    x, y0 = origin
+    for i, line in enumerate(textwrap.dedent(text).splitlines()):
+        y = y0 + i * int(30 * font_scale)
+        cv2.putText(img, line, (x, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                    color, thickness, cv2.LINE_AA)
+
 # ---------- 主流程 ----------
-def analyse_video(path, smooth, sg_win, sg_poly, ema_alpha,
-                  len_th, pel_th):
+def analyse_and_annotate(path: str, smooth: str,
+                         sg_win: int, sg_poly: int, ema_alpha: float,
+                         len_th: float, pel_th: float, out_path: str):
 
     if not os.path.isfile(path):
         raise FileNotFoundError(f"找不到影片檔：{path}")
 
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
-        raise RuntimeError("OpenCV 無法讀取影片，請確認檔案格式/權限")
+        raise RuntimeError("OpenCV 無法讀取影片")
 
-    frame_cnt = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    W   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    H   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    vw  = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(out_path, vw, fps, (W, H))
+
     mp_pose = mp.solutions.pose.Pose(
         static_image_mode=False, model_complexity=1,
         min_detection_confidence=0.6, min_tracking_confidence=0.6)
 
-    len_L, len_R, pel_dy = [], [], []
+    len_L, len_R, pel_dy, per_frame_flag = [], [], [], []
 
     with mp_pose:
-        for _ in tqdm(range(frame_cnt), desc="解析中"):
+        pbar = tqdm(total=int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+                    desc="處理影片中")
+        while True:
             ok, frame = cap.read()
             if not ok: break
+
             res = mp_pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            lm = res.pose_landmarks
-            if not lm: continue
-            pts = [(p.x, p.y, p.visibility) for p in lm.landmark]
-            if min(pts[L_HIP][2], pts[R_HIP][2],
-                   pts[L_ANK][2], pts[R_ANK][2]) < 0.6:
-                continue
-            len_L.append(euclidean(pts[L_HIP], pts[L_ANK]))
-            len_R.append(euclidean(pts[R_HIP], pts[R_ANK]))
-            pel_dy.append(abs(pts[L_HIP][1] - pts[R_HIP][1]))
+            lm  = res.pose_landmarks
+            flag = False
 
-    cap.release()
-    if not len_L or not len_R:
-        raise RuntimeError("影片中未偵測到足夠的可用關鍵點，無法計算 LLD")
+            if lm:
+                pts = [(p.x, p.y, p.visibility) for p in lm.landmark]
+                if min(pts[L_HIP][2], pts[R_HIP][2],
+                       pts[L_ANK][2], pts[R_ANK][2]) >= 0.6:
 
-    # 平滑
-    len_L = smooth_series(len_L, smooth, window=sg_win, poly=sg_poly,
-                          alpha=ema_alpha)
-    len_R = smooth_series(len_R, smooth, window=sg_win, poly=sg_poly,
-                          alpha=ema_alpha)
-    pel_dy = smooth_series(pel_dy, smooth, window=sg_win, poly=sg_poly,
-                           alpha=ema_alpha)
+                    def px(pt):  # 轉成像素
+                        return np.array([pt[0]*W, pt[1]*H], dtype=int)
 
-    mean_leg = (np.mean(len_L) + np.mean(len_R)) / 2
-    diff_ratio = abs(np.mean(len_L) - np.mean(len_R)) / mean_leg
-    pel_ratio  = np.mean(pel_dy) / mean_leg
+                    LL  = euclidean(pts[L_HIP], pts[L_ANK])
+                    RL  = euclidean(pts[R_HIP], pts[R_ANK])
+                    pdy = abs(pts[L_HIP][1] - pts[R_HIP][1])
 
-    result = dict(
-        mean_leg_L = float(np.mean(len_L)),
-        mean_leg_R = float(np.mean(len_R)),
-        length_diff_ratio = float(diff_ratio),
-        pelvis_tilt_ratio = float(pel_ratio),
-        LLD_flag = diff_ratio > len_th or pel_ratio > pel_th
+                    len_L.append(LL); len_R.append(RL); pel_dy.append(pdy)
+
+                    mean_leg   = (LL + RL) / 2
+                    diff_ratio = abs(LL - RL) / mean_leg
+                    pel_ratio  = pdy / mean_leg
+                    flag = diff_ratio > len_th or pel_ratio > pel_th
+                    per_frame_flag.append(flag)
+
+                    if flag:
+                        short_is_left = LL < RL
+                        hip   = px(pts[L_HIP] if short_is_left else pts[R_HIP])
+                        ankle = px(pts[L_ANK] if short_is_left else pts[R_ANK])
+                        cv2.line(frame, tuple(hip), tuple(ankle),
+                                 (0,0,255), thickness=6)
+                        leg_txt = "L" if short_is_left else "R"
+                        put_multiline(frame,
+                                      f"LLD DETECTED\n(Shorter leg: {leg_txt})",
+                                      (20, 40))
+                else:
+                    per_frame_flag.append(False)
+                    put_multiline(frame, "POSE NOT DETECTED", (20, 40),
+                                  font_scale=0.8, color=(0,255,255))
+            else:
+                per_frame_flag.append(False)
+                put_multiline(frame, "POSE NOT DETECTED", (20, 40),
+                              font_scale=0.8, color=(0,255,255))
+
+            writer.write(frame)
+            pbar.update(1)
+
+    cap.release(); writer.release()
+
+    # ---------- 平滑 ----------
+    if len(len_L) and len(len_R):
+        len_L_s   = smooth_series(len_L, smooth,
+                                  window=sg_win, poly=sg_poly,
+                                  alpha=ema_alpha)
+        len_R_s   = smooth_series(len_R, smooth,
+                                  window=sg_win, poly=sg_poly,
+                                  alpha=ema_alpha)
+        pel_dy_s  = smooth_series(pel_dy, smooth,
+                                  window=sg_win, poly=sg_poly,
+                                  alpha=ema_alpha)
+        has_data  = len(len_L_s) > 0
+    else:
+        # 沒偵測到姿勢
+        len_L_s = len_R_s = pel_dy_s = np.asarray([])
+        has_data = False
+
+    if has_data:
+        mean_leg = (np.mean(len_L_s) + np.mean(len_R_s)) / 2
+        diff_ratio = abs(np.mean(len_L_s) - np.mean(len_R_s)) / mean_leg
+        pel_ratio  = np.mean(pel_dy_s) / mean_leg
+        overall_flag = diff_ratio > len_th or pel_ratio > pel_th
+    else:
+        diff_ratio = pel_ratio = 0.0
+        overall_flag = False
+
+    # ---------- CSV ----------
+    csv_path = None
+    if has_data:
+        csv_path = os.path.splitext(path)[0] + "_lld.csv"
+        df = pd.DataFrame({
+            "LL": len_L_s,
+            "RL": len_R_s,
+            "PelvisDy": pel_dy_s,
+            "LLD_Frame_Flag": per_frame_flag[:len(len_L_s)]
+        })
+        df.to_csv(csv_path, index=False)
+
+    return dict(
+        mean_leg_L = float(np.mean(len_L_s)) if has_data else None,
+        mean_leg_R = float(np.mean(len_R_s)) if has_data else None,
+        length_diff_ratio = float(diff_ratio) if has_data else None,
+        pelvis_tilt_ratio = float(pel_ratio)  if has_data else None,
+        LLD_flag = overall_flag,
+        annotated_video = out_path,
+        csv = csv_path
     )
-
-    # 逐幀 CSV
-    csv_out = os.path.splitext(path)[0] + "_lld.csv"
-    pd.DataFrame({"LL":len_L,"RL":len_R,"PelvisDy":pel_dy}).to_csv(csv_out,
-                                                                   index=False)
-    return result, csv_out
 
 # ---------- CLI ----------
 def main():
     ap = argparse.ArgumentParser(
-        description="Leg-Length Discrepancy Detector (MediaPipe Pose)")
+        description="Leg-Length Discrepancy Annotator (MediaPipe Pose)")
     ap.add_argument("--video", default=DEFAULT_VIDEO,
                     help="影片路徑；留空則使用預設檔案")
-    ap.add_argument("--smoothing", choices=["sg","ema"],
+    ap.add_argument("--output", default=None,
+                    help="標註後影片輸出路徑 (預設 *_annotated.mp4)")
+    ap.add_argument("--smoothing", choices=["sg", "ema"],
                     default=DEFAULT_SMOOTH)
     ap.add_argument("--sg-window", type=int, default=15)
     ap.add_argument("--sg-poly",   type=int, default=2)
@@ -119,18 +195,21 @@ def main():
     ap.add_argument("--pelvis-threshold", type=float, default=DEFAULT_PEL_TH)
     args = ap.parse_args()
 
+    video_path = args.video
+    out_path = (args.output if args.output
+                else os.path.splitext(video_path)[0] + "_annotated.mp4")
+
     try:
-        res, csv_path = analyse_video(
-            args.video, args.smoothing, args.sg_window,
-            args.sg_poly, args.ema_alpha,
-            args.length_threshold, args.pelvis_threshold)
+        res = analyse_and_annotate(
+            video_path, args.smoothing, args.sg_window, args.sg_poly,
+            args.ema_alpha, args.length_threshold, args.pelvis_threshold,
+            out_path)
     except Exception as e:
         sys.exit(f"[Error] {e}")
 
     print("\n=== 影片分析結果 ===")
-    for k,v in res.items():
-        print(f"{k:20}: {v:.4f}" if isinstance(v,float) else f"{k:20}: {v}")
-    print(f"逐幀數據已輸出：{csv_path}")
+    for k, v in res.items():
+        print(f"{k:20}: {v:.4f}" if isinstance(v, float) else f"{k:20}: {v}")
 
 if __name__ == "__main__":
     main()

@@ -13,7 +13,7 @@ from tqdm import tqdm
 import argparse, os, sys, textwrap
 
 # ---------- 預設 ----------
-DEFAULT_VIDEO   = "C:\\Users\\User\\Desktop\\0717.mp4"
+DEFAULT_VIDEO   = "C:\\Users\\User\\Desktop\\Long _and _short l_egs.mp4"
 DEFAULT_SMOOTH  = "sg"            # sg / ema
 DEFAULT_LEN_TH  = 0.03            # 腿長差判斷閾值 (比例)
 DEFAULT_PEL_TH  = 0.05            # 骨盆傾斜判斷閾值 (比例)

@@ -1,151 +1,253 @@
 #!/usr/bin/env python
-# tiptoe_from_video_3d.py
+# ttw_inframe_fixed_block.py
 # -----------------------------------------------------------
-# 功能：以 Mediapipe Pose 3D 座標偵測「踮腳尖走路（TTW）」
-# 作者：Yen 的 AI 助手（2025.07）
+# 在「影片內固定區塊(HUD)」顯示角度；僅在該腳判定為踮腳時顯示數值
+# 判斷：∠(膝, 踝, 第1趾) > 門檻 且 toe_y < heel_y（你的原始邏輯）
+# 無 TIPTOE 大字、無 EHR、無 PyQt；正常速度播放
 # -----------------------------------------------------------
 
 # ========= ① 這裡改路徑即可 =========
-VIDEO_PATH      = "C:\\Users\\User\\Desktop\\幼童_踮腳尖走路.mp4"
-SAVE_ANNOTATION = True          # False → 僅輸出 JSON，不存標註影片
-USE_3D          = True          # True → 用 3D 關節角；False → 回到 2D
+VIDEO_PATH        = "D:\\幼童足部辨識\\踮腳走路\\幼童_踮腳尖走路.mp4"
+USE_3D            = False      # 有 world_landmarks 就用 3D，否則回退 2D
+SAVE_ANNOTATION   = True       # ← 置 True 才會輸出含標註影片
+OUTPUT_DIR        = None       # None=與來源同資料夾；或填 r"D:\export"
+OUTPUT_SUFFIX     = "_ttw"     # 會輸出成 <原檔名>_ttw.mp4
+AVOID_OVERWRITE   = True       # True：若重名會自動加 _1, _2 ...
+OUTPUT_CODEC      = "mp4v"     # 常見：mp4v（.mp4），或 "XVID"（.avi）
+PLAYBACK_SPEED    = 1.0        # 正常速度；不要加速就維持 1.0
 # ====================================
 
-import cv2, mediapipe as mp, numpy as np, json, time, pathlib
+import time
+import numpy as np
+import cv2, mediapipe as mp
 from collections import deque
+from pathlib import Path
+import os
 
-# ======== 可調參數 ========
-PF_THRESHOLD_DEG     = 8.0   # 3D 角度臨界值（2D 建議 5.0）
-EARLY_RISE_PERCENT   = 0.30  # < 30 % gait cycle heel-rise ⇒ 異常
-FRAME_RATIO_FLAG     = 0.50  # 全片 > 50 % 影格被標 TTW ⇒ 整段踮腳
-WIN_SMOOTH_ANGLE     = 7     # 角度移動平均視窗(影格)
-WIN_SMOOTH_ANKLE_Y   = 7     # 踝 y 移動平均視窗(影格)
-FONT = cv2.FONT_HERSHEY_SIMPLEX
-# =========================
+# ====== 顯示/濾波參數 ======
+PF_THRESHOLD_DEG   = 8.0       # 踮腳門檻（需要更嚴格可調高，如 100~110）
+SMA_WIN            = 7         # 角度移動平均視窗
+EMA2D_ALPHA        = 0.35      # 2D 座標 EMA
+EMA3D_ALPHA        = 0.35      # 3D 座標 EMA
 
-def angle2d(p1, p2, p3):
-    """2D ∠p1-p2-p3（度）"""
-    a, b, c = map(np.array, (p1, p2, p3))
-    cosv = np.dot(a-b, c-b) / (np.linalg.norm(a-b)*np.linalg.norm(c-b) + 1e-6)
-    return np.degrees(np.arccos(np.clip(cosv, -1, 1)))
+# HUD 固定區塊（不會越看越大）
+PANEL_POS          = "tr"      # 'tr','tl','br','bl'
+PANEL_W_RATIO      = 0.36      # 區塊寬度佔影像寬度比例（固定，不隨字變）
+PANEL_ALPHA        = 0.75
+PANEL_BG_COLOR     = (255, 255, 255)  # ← 底色（BGR），你之前改成白底
+FONT               = cv2.FONT_HERSHEY_SIMPLEX
+FONT_SCALE_REF     = 0.60      # 以 1080p 為基準
+LINE_H_REF         = 28
+TEXT_COLOR         = (255, 0, 0)      # BGR 藍
+TEXT_THICK         = 1
 
-def angle3d(p1, p2, p3):
-    """3D ∠p1-p2-p3（度）"""
-    return angle2d(p1, p2, p3) if not USE_3D else _angle3d_inner(p1, p2, p3)
+# 關鍵點簡單標示（膝-踝-趾、腳跟）
+DOT_RADIUS         = 4
+DOT_COLOR          = (0, 200, 0)
+SEG_COLOR          = (180, 180, 180)
 
-def _angle3d_inner(p1, p2, p3):
-    a, b, c = map(np.array, (p1, p2, p3))
-    cosv = np.dot(a-b, c-b) / (np.linalg.norm(a-b)*np.linalg.norm(c-b) + 1e-6)
-    return np.degrees(np.arccos(np.clip(cosv, -1, 1)))
+mp_pose = mp.solutions.pose
 
-def moving_avg(q: deque, val: float):
-    q.append(val)
-    return sum(q) / len(q)
+# --------- 小工具 ----------
+class SMA:
+    def __init__(self, win=7): self.q = deque(maxlen=win)
+    def push(self, v):
+        self.q.append(float(v));  return sum(self.q)/len(self.q)
 
-def detect_tiptoe(video_path: pathlib.Path, save_video: bool):
-    pose = mp.solutions.pose.Pose(
-        model_complexity=1, smooth_landmarks=True,
-        min_detection_confidence=0.5, min_tracking_confidence=0.5
-    )
+class EMA:
+    def __init__(self, alpha=0.3): self.alpha=float(alpha); self.v=None
+    def push(self, x):
+        x = np.asarray(x, dtype=float)
+        self.v = x if self.v is None else self.alpha*x + (1-self.alpha)*self.v
+        return self.v
 
-    cap = cv2.VideoCapture(str(video_path))
-    fps, w, h = (cap.get(cv2.CAP_PROP_FPS) or 30,
-                 int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                 int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+def angle_nd(a, b, c):
+    a,b,c = map(np.asarray,(a,b,c))
+    v1, v2 = a-b, c-b
+    denom = (np.linalg.norm(v1) * np.linalg.norm(v2)) + 1e-9
+    cosv  = float(np.dot(v1, v2) / denom)
+    return np.degrees(np.arccos(np.clip(cosv, -1.0, 1.0)))
 
-    if save_video:
-        out_path = video_path.with_stem(video_path.stem + "_ttw").with_suffix(".mp4")
-        writer   = cv2.VideoWriter(str(out_path),
-                                   cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+def fmt_num(val, digits=2):
+    if val is None or np.isnan(val) or np.isinf(val):  return "N/A"
+    return f"{float(val):.{digits}f}"
 
-    q_angle, q_ankleY = deque(maxlen=WIN_SMOOTH_ANGLE), deque(maxlen=WIN_SMOOTH_ANKLE_Y)
-    flags, heel_rise_events = [], 0
-    gait_start, prev_ankle_y, idx = None, None, 0
-    t0 = time.time()
+def build_out_path(video_path, suffix="_ttw", ext=".mp4",
+                   out_dir=None, avoid_overwrite=True):
+    """產生輸出路徑；必要時自動加編號避免覆蓋"""
+    p = Path(video_path)
+    out_dir = Path(out_dir) if out_dir else p.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = p.stem + suffix
+    out_path = out_dir / f"{stem}{ext}"
+    if avoid_overwrite:
+        k, final = 1, out_path
+        while final.exists():
+            final = out_dir / f"{stem}_{k}{ext}"
+            k += 1
+        out_path = final
+    return out_path
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+def draw_info_panel(frame, lines, pos="tr"):
+    """在 frame 上畫固定大小的 HUD（不隨內容變大）"""
+    h, w = frame.shape[:2]
+    panel_w = int(w * PANEL_W_RATIO)
+    font_scale = FONT_SCALE_REF * (h/1080.0)
+    line_h     = int(max(18, LINE_H_REF * (h/1080.0)))
+    pad        = int(12 * (h/1080.0))
+    box_h      = pad*2 + line_h*len(lines)
+
+    if pos == "tr":   x0, y0 = w - panel_w - 10, 10
+    elif pos == "tl": x0, y0 = 10, 10
+    elif pos == "br": x0, y0 = w - panel_w - 10, h - box_h - 10
+    else:             x0, y0 = 10, h - box_h - 10
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y0), (x0+panel_w, y0+box_h), PANEL_BG_COLOR, -1)  # 底色
+    cv2.addWeighted(overlay, PANEL_ALPHA, frame, 1-PANEL_ALPHA, 0, frame)         # 透明度
+
+    y = y0 + pad + line_h - int(line_h*0.3)
+    for text in lines:
+        # 需要描邊提高可讀性可解除下兩行註解
+        # cv2.putText(frame, text, (x0+pad, y), FONT, font_scale, (0,0,0), TEXT_THICK+2, cv2.LINE_AA)
+        cv2.putText(frame, text, (x0+pad, y), FONT, font_scale, TEXT_COLOR, TEXT_THICK, cv2.LINE_AA)
+        y += line_h
+
+def draw_side(frame, get2d, K, A, T, H):
+    """只畫膝-踝-趾與腳跟；回傳踝座標"""
+    xK,yK = map(int, get2d(K)); xA,yA = map(int, get2d(A))
+    xT,yT = map(int, get2d(T)); xH,yH = map(int, get2d(H))
+    cv2.circle(frame,(xK,yK),DOT_RADIUS,DOT_COLOR,-1)
+    cv2.circle(frame,(xA,yA),DOT_RADIUS,DOT_COLOR,-1)
+    cv2.circle(frame,(xT,yT),DOT_RADIUS,DOT_COLOR,-1)
+    cv2.circle(frame,(xH,yH),DOT_RADIUS,DOT_COLOR,-1)
+    cv2.line(frame,(xK,yK),(xA,yA),SEG_COLOR,2)
+    cv2.line(frame,(xA,yA),(xT,yT),SEG_COLOR,2)
+    return xA,yA
+
+def main():
+    cap = cv2.VideoCapture(VIDEO_PATH)
+    if not cap.isOpened():
+        print(f"[!] 無法開啟影片：{VIDEO_PATH}"); return
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    target_dt = (1.0 / fps) / max(PLAYBACK_SPEED, 1e-6)
+    next_t = time.perf_counter() + target_dt
+
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # ===== 建立輸出 writer（若啟用） =====
+    writer, out_path = None, None
+    if SAVE_ANNOTATION:
+        # 副檔名依 codec 給合理預設
+        ext = ".mp4" if OUTPUT_CODEC.lower() == "mp4v" else ".avi"
+        out_path = build_out_path(
+            VIDEO_PATH, suffix=OUTPUT_SUFFIX, ext=ext,
+            out_dir=OUTPUT_DIR, avoid_overwrite=AVOID_OVERWRITE
+        )
+        fourcc = cv2.VideoWriter_fourcc(*OUTPUT_CODEC)
+        writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
+        if not writer.isOpened():
+            # 嘗試備援 codec（例如某些系統缺 mp4v）
+            print("[!] 指定的編碼器無法開啟，改用 XVID(.avi) 備援。")
+            fourcc = cv2.VideoWriter_fourcc(*"XVID")
+            out_path = build_out_path(VIDEO_PATH, suffix=OUTPUT_SUFFIX, ext=".avi",
+                                      out_dir=OUTPUT_DIR, avoid_overwrite=AVOID_OVERWRITE)
+            writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
+        if writer.isOpened():
+            print(f"[i] 會輸出標註影片：{out_path}")
+        else:
+            print("[!] 無法建立輸出影片，將只顯示不寫檔。")
+            writer = None
+
+    pose = mp_pose.Pose(model_complexity=2, smooth_landmarks=True,
+                        min_detection_confidence=0.6, min_tracking_confidence=0.6)
+
+    # 用到的索引
+    L_KNEE, L_ANK, L_HEEL, L_TOE = 25, 27, 29, 31
+    R_KNEE, R_ANK, R_HEEL, R_TOE = 26, 28, 30, 32
+
+    # 濾波器
+    sma_pf = {"L": SMA(SMA_WIN), "R": SMA(SMA_WIN)}
+    ema2d  = {i: EMA(EMA2D_ALPHA) for i in (25,27,29,31, 26,28,30,32)}
+    ema3d  = {i: EMA(EMA3D_ALPHA) for i in (25,27,31, 26,28,32)}
+
+    frame_count = 0
+    t0 = time.perf_counter()
+
+    while True:
+        ok, frame = cap.read()
+        if not ok: break
+        frame_count += 1
 
         res = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        is_tiptoe = False
+
+        L_show = R_show = None  # 只有踮腳才給數值，否則 N/A
 
         if res.pose_landmarks:
             lm2d = res.pose_landmarks.landmark
-            RK2, RA2, RH2, RT2 = lm2d[26], lm2d[28], lm2d[30], lm2d[32]
+            use_world = USE_3D and (res.pose_world_landmarks is not None)
+            world = res.pose_world_landmarks.landmark if use_world else None
 
-            # ------- 角度計算 -------
-            if USE_3D and res.pose_world_landmarks:
-                world = res.pose_world_landmarks.landmark
-                RK, RA, RT = world[26], world[28], world[32]
-                ang_raw = angle3d((RK.x, RK.y, RK.z),
-                                  (RA.x, RA.y, RA.z),
-                                  (RT.x, RT.y, RT.z))
-            else:  # 回退 2D
-                ang_raw = angle2d((RK2.x*w, RK2.y*h),
-                                  (RA2.x*w, RA2.y*h),
-                                  (RT2.x*w, RT2.y*h))
+            def get2d(i):
+                u = lm2d[i]; pt = np.array([u.x*w, u.y*h], float)
+                return ema2d[i].push(pt)
 
-            ang_sm = moving_avg(q_angle, ang_raw)
+            def get3d(i):
+                if world is None:
+                    x,y = get2d(i); pt = np.array([x, y, 0.0], float)
+                else:
+                    u = world[i];   pt = np.array([u.x, u.y, u.z], float)
+                return ema3d.get(i, EMA(EMA3D_ALPHA)).push(pt)
 
-            # ------- 踝 y 平滑 -------
-            q_ankleY.append(RA2.y)
-            ankle_sm = sum(q_ankleY) / len(q_ankleY)
+            # 左右 PF（SMA 平滑）
+            L_pf = sma_pf["L"].push(angle_nd(get3d(L_KNEE), get3d(L_ANK), get3d(L_TOE)))
+            R_pf = sma_pf["R"].push(angle_nd(get3d(R_KNEE), get3d(R_ANK), get3d(R_TOE)))
 
-            # ------- 判斷踮腳 -------
-            toe_higher = RT2.y < RH2.y
-            if ang_sm > PF_THRESHOLD_DEG and toe_higher:
-                is_tiptoe = True
-                if save_video:
-                    cv2.putText(frame, "TIPTOE", (50, 60), FONT, 1.8, (0, 0, 255), 3)
+            # 原始踮腳判斷（以 2D y 判斷趾高於跟；y 越小越高）
+            left_tiptoe  = (L_pf > PF_THRESHOLD_DEG) and (lm2d[L_TOE].y < lm2d[L_HEEL].y)
+            right_tiptoe = (R_pf > PF_THRESHOLD_DEG) and (lm2d[R_TOE].y < lm2d[R_HEEL].y)
 
-            # ------- early heel-rise -------
-            if prev_ankle_y is not None:
-                delta = ankle_sm - prev_ankle_y
-                if delta > 0 and gait_start is None:     # ankle 開始下降
-                    gait_start = idx
-                if delta < 0 and gait_start is not None: # ankle 上升 → heel-rise
-                    pct = (idx - gait_start) / fps
-                    if pct < EARLY_RISE_PERCENT:
-                        heel_rise_events += 1
-                        if save_video:
-                            cv2.putText(frame, "EARLY HEEL RISE",
-                                        (50, 120), FONT, 1.2, (255, 0, 0), 2)
-                    gait_start = None
-            prev_ankle_y = ankle_sm
+            # 畫最小關鍵點骨架（兩側都畫）
+            draw_side(frame, get2d, L_KNEE, L_ANK, L_TOE, L_HEEL)
+            draw_side(frame, get2d, R_KNEE, R_ANK, R_TOE, R_HEEL)
 
-        flags.append(is_tiptoe)
-        if save_video:
-            writer.write(frame)
-        idx += 1
+            # 僅在踮腳時，把數值放到 HUD
+            if left_tiptoe:  L_show = float(L_pf)
+            if right_tiptoe: R_show = float(R_pf)
 
+        # ---- 影片內固定區塊（只兩行）----
+        lines = [f"Left  foot: {fmt_num(L_show)}",
+                 f"Right foot: {fmt_num(R_show)}"]
+        draw_info_panel(frame, lines, pos=PANEL_POS)
+
+        # 顯示 / 存檔
+        cv2.imshow("TTW：影片內固定區塊（僅踮腳顯示度數）", frame)
+        if writer is not None: writer.write(frame)
+
+        # 正常速度節拍
+        now = time.perf_counter()
+        sleep_s = next_t - now
+        if sleep_s > 0: time.sleep(sleep_s)
+        next_t += target_dt
+
+        if cv2.waitKey(1) & 0xFF == 27:  # ESC 離開
+            break
+
+    # ===== 清理與落款 =====
     cap.release()
-    if save_video:
-        writer.release()
     pose.close()
+    if writer is not None:
+        writer.release()
+    cv2.destroyAllWindows()
 
-    ratio = float(np.mean(flags)) if flags else 0.0
-    report = {
-        "video": str(video_path),
-        "fps": fps,
-        "frames": idx,
-        "tiptoe_frames": int(sum(flags)),
-        "tiptoe_ratio": round(ratio, 3),
-        "overall_tiptoe": ratio >= FRAME_RATIO_FLAG,
-        "early_heel_rise_events": heel_rise_events
-    }
+    dt = time.perf_counter() - t0
+    if out_path and Path(out_path).exists():
+        print(f"[✓] 輸出完成：{out_path}")
+        print(f"[i] 解析度：{w}x{h}，幀數：{frame_count}，FPS：{fps:.2f}，耗時：{dt:.2f}s")
+    else:
+        print("[i] 沒有輸出影片（SAVE_ANNOTATION=False 或 writer 建立失敗）。")
 
-    json_path = video_path.with_suffix(".ttw.json")
-    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2))
-
-    # ---- 終端輸出 ----
-    print(json.dumps(report, ensure_ascii=False, indent=2))
-    print(f"⇢ 全程耗時：{time.time() - t0:.1f} 秒")
-    if save_video:
-        print(f"⇢ 已輸出標註影片：{out_path}")
-    print(f"⇢ JSON 統計：{json_path}")
-
-# ===== 程式進入點 =====
 if __name__ == "__main__":
-    detect_tiptoe(pathlib.Path(VIDEO_PATH), save_video=SAVE_ANNOTATION)
+    main()

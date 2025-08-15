@@ -60,6 +60,9 @@ R_FI = POSE.RIGHT_FOOT_INDEX.value
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
+# 統一 toe 模式顯示色（BGR）— 與「外八」同色紅
+OUT_TOED_COLOR = (0, 0, 255)
+
 
 # -----------------------------
 # 共用：幾何與工具
@@ -86,7 +89,6 @@ def safe_fps(cap, default=30.0) -> float:
 # ============================================================
 # in_out_toeing.py 之分析核心（移植為 CLI 版，不含 PyQt GUI）
 # ============================================================
-# 參考你原檔的 overlay + analyzer + pose_backend 做法。:contentReference[oaicite:2]{index=2}
 
 _REQUIRED_KEYS = [
     "left_hip","right_hip","left_knee","right_knee","left_ankle","right_ankle",
@@ -137,8 +139,8 @@ def analyze_leg_rotation(
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     回傳 per-side 狀態（In-Toed / Out-Toed / Neutral）與角度等數據。
-    演算法與你 in_out_toeing.py 一致：以髖中心在 XZ 的位移估算身體前向，
-    取足部 heel→toe 的 XZ 投影與前向夾角，並做 EMA 平滑與高/低雙閾判定。:contentReference[oaicite:3]{index=3}
+    以髖中心在 XZ 的位移估算身體前向；取足部 heel→toe 的 XZ 投影與前向夾角，
+    進行 EMA 平滑與高/低雙閾判定。
     """
     if isinstance(landmarks, Mapping):
         lm = _normalize_dict_keys(landmarks)
@@ -233,7 +235,6 @@ def analyze_leg_rotation(
 class ToeAnalyzer:
     """
     內/外八 CLI 版：逐帧分析 + OpenCV 疊字 + 匯出影片與 JSON。
-    以 in_out_toeing.py 的 PoseBackend 與 analyzer 邏輯為基礎。:contentReference[oaicite:4]{index=4}
     """
     def __init__(self, save_video: bool = True, size: Optional[Tuple[int, int]] = None):
         self.save_video = save_video
@@ -279,7 +280,7 @@ class ToeAnalyzer:
                 lm = res.pose_landmarks.landmark
                 analysis, prev_state = analyze_leg_rotation(lm, previous=prev_state)
 
-                # 足部箭頭（綠：左；紅：右），身體前向箭頭（紫）
+                # 足部箭頭 — 統一為外八同色紅
                 for side in ("left", "right"):
                     heel = lm[L_HEEL if side == "left" else R_HEEL]
                     toe = lm[L_FI if side == "left" else R_FI]
@@ -288,17 +289,15 @@ class ToeAnalyzer:
                     foot_vec = toe_pt - heel_pt
                     norm = np.linalg.norm(foot_vec) + 1e-6
                     foot_vec /= norm
-                    draw_arrow(frame, heel_pt, foot_vec,
-                               color=(0, 255, 0) if side == "left" else (0, 0, 255),
-                               scale=80, thickness=2)
+                    draw_arrow(frame, heel_pt, foot_vec, color=OUT_TOED_COLOR, scale=80, thickness=2)
 
-                # 身體前向箭頭
+                # 身體前向箭頭 — 統一為外八同色紅
                 hip_l, hip_r = lm[L_HIP], lm[R_HIP]
                 hip_center = ((hip_l.x + hip_r.x) / 2 * w, (hip_l.y + hip_r.y) / 2 * h)
                 if prev_state and prev_state.get("bf_vec") is not None:
-                    draw_body_forward(frame, hip_center, prev_state["bf_vec"])
+                    draw_body_forward(frame, hip_center, prev_state["bf_vec"], color=OUT_TOED_COLOR)
 
-                # 疊字：左右狀態與角度
+                # 疊字（只改字色，不改位置或框）
                 l = analysis.get("left_leg", {}); r = analysis.get("right_leg", {})
                 box_lines = [
                     f"Left  : {l.get('status','--')}  (foot {l.get('foot_angle_deg',0):.2f}°, hipRot {l.get('hip_rotation_deg',0):.2f}°)",
@@ -310,7 +309,7 @@ class ToeAnalyzer:
                 cv2.rectangle(frame, (4, 4), (4 + maxw, 4 + line_h * len(box_lines)), (255, 255, 255), -1)
                 y = 4 + line_h - 4
                 for t in box_lines:
-                    cv2.putText(frame, t, (8, y), FONT, 0.7, (0, 0, 200), 2, cv2.LINE_AA)
+                    cv2.putText(frame, t, (8, y), FONT, 0.7, OUT_TOED_COLOR, 2, cv2.LINE_AA)
                     y += line_h
 
                 # 統計
@@ -363,7 +362,7 @@ class ToeAnalyzer:
 
 
 # ============================================================
-# 下面三個模式，沿用你原本 merge.py 的設計（略有整理）
+# 下面三個模式
 # ============================================================
 @dataclass
 class ProbeStats:
@@ -374,17 +373,6 @@ class ProbeStats:
 
 
 class AutoRouter:
-    """
-    讀取影片前 N 影格，估計三個指標：
-      - tiptoe_ratio：有「踮腳姿勢」徵象之影格比例
-      - stationary_ratio：移動量低的影格比例（站立較多）
-      - shoulder_level_ok_ratio：左右肩水平（正面）之影格比例
-    判斷（維持既有行為）：
-      1) tiptoe_ratio >= 0.30 → tiptoe
-      2) 否則 stationary_ratio >= 0.60 且 shoulder_level_ok_ratio >= 0.6 → xo
-      3) 其餘 → hka
-    （toe 模式保留手動切換，不更動原自動路由。）:contentReference[oaicite:5]{index=5}
-    """
     PF_THRESHOLD_DEG = 8.0
     PROBE_MAX_FRAMES = 360
     MOVE_THRESH = 0.003
@@ -421,7 +409,7 @@ class AutoRouter:
 
             lm = res.pose_landmarks.landmark
 
-            # tiptoe：踝角度 + 腳尖高於腳跟（沿用）
+            # tiptoe：踝角度 + 腳尖高於腳跟
             def ankle_angle_and_toe_higher(side: str) -> Tuple[float, bool]:
                 if side == "R":
                     k, a, fi, heel = lm[R_KNEE], lm[R_ANKLE], lm[R_FI], lm[R_HEEL]
@@ -775,6 +763,7 @@ class HKAAnnotator:
                     "L_ankle": angle_between(Lknee, Lankle, Lfi),
                     "R_hip": angle_between(Rsh, Rhip, Rknee),
                     "R_knee": angle_between(Rhip, Rknee, Rankle),
+                    # 修正：RKnee → Rknee
                     "R_ankle": angle_between(Rknee, Rankle, Rfi),
                 }
 
@@ -868,7 +857,7 @@ def main():
 
     video_path = resolve_input_video(args.video)
 
-    # 自動判斷（保留原行為）:contentReference[oaicite:6]{index=6}
+    # 自動判斷
     mode = args.mode
     if mode == "auto":
         router = AutoRouter()

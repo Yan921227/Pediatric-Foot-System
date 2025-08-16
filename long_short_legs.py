@@ -13,11 +13,11 @@ from PyQt5 import QtWidgets, QtGui, QtCore
 from PyQt5.QtWidgets import QFileDialog
 
 # ── 外觀設定 ─────────────────────────────────────────
-FONT          = cv2.FONT_HERSHEY_SIMPLEX
+FONT          = cv2.FONT_HERSHEY_COMPLEX
 FONT_SCALE    = 0.9         # 字體大小（0.5~1.5）
 THICKNESS     = 2           # 字體粗細
-BOX_COLOR     = (0, 0, 0)   # BGR，黑底
-TEXT_COLOR    = (255, 255, 255)  # BGR，白字
+BOX_COLOR     = (255, 255, 255)   # BGR，黑底
+TEXT_COLOR    = (255, 0, 0)  # BGR，白字
 BOX_ALPHA     = 1.0         # 透明度 (0~1)。1 為不透明，<1 需要額外混色，示例簡化不做。
 
 # ───────────────────────────────────────────────────

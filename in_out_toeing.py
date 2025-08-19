@@ -1,6 +1,6 @@
-# foot_pose_all_in_one.py
-# 整合：overlay.py + analyzer.py + pose_backend.py + gui_app.py
-# 需求：PyQt5, opencv-python, mediapipe, numpy
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# foot_pose_all_in_one.py － 移除（註解）PyQt 疊字，僅保留 OpenCV 疊字
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import cv2
 import numpy as np
 from math import acos, degrees
 from PyQt5 import QtCore, QtGui, QtWidgets
-
 
 # ───────────────────────────────────────────────────────────────
 # overlay.py 內容（抽成函式）
@@ -41,7 +40,6 @@ def draw_body_forward(image, center, forward_vec, scale=100, color=(255, 0, 255)
     direction = np.array([forward_vec[0], forward_vec[2]])  # XZ→畫面XY
     draw_arrow(image, origin, direction, color=color, scale=scale, thickness=3)
 
-
 # ───────────────────────────────────────────────────────────────
 # analyzer.py 內容（內/外八分析）
 _REQUIRED_KEYS = [
@@ -63,7 +61,6 @@ import mediapipe as mp
 _MP_LM = mp.solutions.pose.PoseLandmark
 _LM_INDEX = {lm.name.lower(): lm.value for lm in _MP_LM}
 
-
 def _to_np(lm) -> np.ndarray:
     return (
         np.array([lm.x, lm.y, lm.z], dtype=float)
@@ -71,12 +68,10 @@ def _to_np(lm) -> np.ndarray:
         else np.asarray(lm)
     )
 
-
 def _ensure_dict(seq: Sequence[Any]) -> Dict[str, np.ndarray]:
     if not _LM_INDEX:
         raise ValueError("請提供 mediapipe 格式或 dict 格式")
     return {k: _to_np(seq[_LM_INDEX[k]]) for k in _REQUIRED_KEYS}
-
 
 def _normalize_dict_keys(lm_dict: Mapping[str, Any]) -> Dict[str, np.ndarray]:
     return {
@@ -84,16 +79,13 @@ def _normalize_dict_keys(lm_dict: Mapping[str, Any]) -> Dict[str, np.ndarray]:
         for k, v in lm_dict.items()
     }
 
-
 def normalize(v: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(v)
     return v if n == 0 else v / n
 
-
 def get_angle(v1: np.ndarray, v2: np.ndarray) -> float:
     dot = np.clip(np.dot(normalize(v1), normalize(v2)), -1.0, 1.0)
     return degrees(acos(dot))
-
 
 def analyze_leg_rotation(
     landmarks: Any,
@@ -201,7 +193,6 @@ def analyze_leg_rotation(
 
     return result, previous
 
-
 # ───────────────────────────────────────────────────────────────
 # pose_backend.py 內容（包 mediapipe + 視覺化）
 class PoseAnalyzer:
@@ -285,7 +276,6 @@ class PoseAnalyzer:
 
         return frame_bgr, analysis
 
-
 # ───────────────────────────────────────────────────────────────
 # gui_app.py 內容（PyQt 視窗 + 影像執行緒）
 def build_metric_lines(left: dict, right: dict) -> list[str]:
@@ -298,7 +288,6 @@ def build_metric_lines(left: dict, right: dict) -> list[str]:
         f"Right foot   : {right.get('foot_angle_deg', 0):.2f}",
         f"Right hipRot : {right.get('hip_rotation_deg', 0):.2f}",
     ]
-
 
 class VideoWorker(QtCore.QThread):
     frameReady = QtCore.pyqtSignal(QtGui.QImage)
@@ -342,6 +331,7 @@ class VideoWorker(QtCore.QThread):
             frame = cv2.resize(frame, (self.tgt_w, self.tgt_h), cv2.INTER_AREA)
             frame, analysis = self._backend.process(frame)
 
+            # 僅保留 OpenCV 疊字
             if self._draw_ocv_text and analysis:
                 self._draw_metrics(frame, analysis)
 
@@ -390,7 +380,6 @@ class VideoWorker(QtCore.QThread):
         self._running = False
         self.wait()
 
-
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, src, size, output, gui_text_only: bool):
         super().__init__()
@@ -398,11 +387,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.videoLabel = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
         self.last_analysis = {}
 
+        # 這裡保留參數，但請不要用 --gui-text-only；我們只用 OpenCV 疊字
         self.worker = VideoWorker(
             src=src,
             target_size=size,
             output_path=output,
-            draw_opencv_text=not gui_text_only,
+            draw_opencv_text=not gui_text_only,  # ← 若傳 True 將關掉 OCV 疊字
         )
         self.worker.frameReady.connect(self.update_view)
         self.worker.analysisReady.connect(self.last_analysis.update)
@@ -412,36 +402,40 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.pyqtSlot(QtGui.QImage)
     def update_view(self, img: QtGui.QImage):
+        # ===== PyQt 疊字（QPainter）已註解，僅顯示已由 OpenCV 疊好的影像 =====
         pix = QtGui.QPixmap.fromImage(img)
-        painter = QtGui.QPainter(pix)
-        painter.setFont(QtGui.QFont("Consolas", 16, QtGui.QFont.Bold))
-        painter.setPen(QtGui.QColor(0, 0, 200))
 
-        l = self.last_analysis.get("left_leg", {})
-        r = self.last_analysis.get("right_leg", {})
-        lines = build_metric_lines(l, r)
+        # --- PYQT_TEXT_OVERLAY_DISABLED_START ---
+        # painter = QtGui.QPainter(pix)
+        # painter.setFont(QtGui.QFont("Consolas", 16, QtGui.QFont.Bold))
+        # painter.setPen(QtGui.QColor(0, 0, 200))
+        #
+        # l = self.last_analysis.get("left_leg", {})
+        # r = self.last_analysis.get("right_leg", {})
+        # lines = build_metric_lines(l, r)
+        #
+        # fm = painter.fontMetrics()
+        # lh = fm.height() + 2
+        # pad = 6
+        # bg_w = max(fm.horizontalAdvance(t) for t in lines) + pad * 2
+        # bg_h = lh * len(lines) + pad * 2
+        # painter.fillRect(
+        #     QtCore.QRect(0, 0, bg_w, bg_h), QtGui.QColor(255, 255, 255, 200)
+        # )
+        #
+        # x, y = pad, pad + fm.ascent()
+        # for txt in lines:
+        #     painter.drawText(x, y, txt)
+        #     y += lh
+        #
+        # painter.end()
+        # --- PYQT_TEXT_OVERLAY_DISABLED_END ---
 
-        fm = painter.fontMetrics()
-        lh = fm.height() + 2
-        pad = 6
-        bg_w = max(fm.horizontalAdvance(t) for t in lines) + pad * 2
-        bg_h = lh * len(lines) + pad * 2
-        painter.fillRect(
-            QtCore.QRect(0, 0, bg_w, bg_h), QtGui.QColor(255, 255, 255, 200)
-        )
-
-        x, y = pad, pad + fm.ascent()
-        for txt in lines:
-            painter.drawText(x, y, txt)
-            y += lh
-
-        painter.end()
         self.videoLabel.setPixmap(pix)
 
     def closeEvent(self, e):
         self.worker.stop()
         e.accept()
-
 
 def _parse_size(s: str) -> tuple[int, int]:
     try:
@@ -449,7 +443,6 @@ def _parse_size(s: str) -> tuple[int, int]:
         return int(w), int(h)
     except Exception:
         raise ValueError("size 參數格式必須是 WxH，例如 608x1080")
-
 
 if __name__ == "__main__":
     import argparse
@@ -466,7 +459,8 @@ if __name__ == "__main__":
         "--output", default="export/123.mp4", help="輸出 MP4 路徑（留空不輸出）"
     )
     ap.add_argument(
-        "--gui-text-only", action="store_true", help="只用 GUI 疊字（關閉 OpenCV 疊字）"
+        "--gui-text-only", action="store_true",
+        help="（已不建議）只用 GUI 疊字；本版本請不要加這個參數"
     )
     args = ap.parse_args()
 
@@ -475,6 +469,7 @@ if __name__ == "__main__":
     output = args.output or None
 
     app = QtWidgets.QApplication(sys.argv)
+    # 強烈建議：不要傳 --gui-text-only，讓 OpenCV 負責疊字
     win = MainWindow(
         src=src, size=size, output=output, gui_text_only=args.gui_text_only
     )

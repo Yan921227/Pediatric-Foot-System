@@ -16,6 +16,7 @@ Auto Gait Router：Tiptoe / HKA（長短腳角度）/ In-Out-Toeing（內外八�
 • 輸出：未指定 --out → <來源>_annotated.mp4；--out none 不存檔。
 
 依賴：opencv-python, mediapipe, PyQt5, numpy
+mediapipe版本10.14
 """
 
 import sys, os, cv2, argparse

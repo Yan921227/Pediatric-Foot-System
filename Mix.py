@@ -14,6 +14,15 @@ Auto Gait Router：Tiptoe / HKA（長短腳角度）/ In-Out-Toeing（內外八�
     - HKA / InOut / XO 面板固定左上；Tiptoe HUD 固定右上。
     - XO 文字顏色沿用：異常=紅、正常=綠；其餘模式用 HUD_TEXT_COLOR。
 
+    # 自動分類四選一
+    python Mix.py
+
+    # 強制某模式
+    python Mix.py --force tiptoe
+    python Mix.py --force inout
+    python Mix.py --force hka
+    python Mix.py --force xo
+
 • 輸入：未指定 --video 時開檔選單。
 • 輸出：未指定 --out → <來源>_annotated.mp4；--out none 不存檔。
 """

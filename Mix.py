@@ -1,40 +1,46 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Auto Gait Router：Tiptoe / HKA（長短腳角度）/ In-Out-Toeing（內外八）
--------------------------------------------------------------------
-• 前置分類：讀取前 N 幀，分流到三者之一（只顯示一種，不混顯）。
+Auto Gait Router：Tiptoe / HKA（長短腳角度）/ In-Out-Toeing（內外八）/ XO（X/O 型腿）
+----------------------------------------------------------------------------------
+• 前置分類：讀取前 N 幀（含暖機 BURN_IN），只分流到「一種」視圖（不混顯）。
     1) Tiptoe（踮腳）：右上角 HUD。
     2) HKA（髖膝踝六行）：左上角面板。
-    3) In-Out-Toeing（內/外八 + 髖內旋）：左上角面板（沿用該法原始位置）。
+    3) In-Out-Toeing（內/外八 + 髖內旋）：左上角面板。
+    4) XO（X/O 型腿：膝距/踝距）：左上角面板；✱ 保留 xo.py 的文字顏色，僅統一字體/透明白底。
 
-• 疊字與樣式：
-    - 全部使用 OpenCV 疊字；字級為「固定像素」(--text-px)，預設 10px。
-    - 白底透明度 PANEL_ALPHA 與字色/粗細三模式一致。
+• 疊字與樣式（四模式一致的規則）
+    - 全部使用 OpenCV 疊字；字級為「固定像素」(--text-px)，不隨影像大小改變。
+    - 半透明白底 PANEL_ALPHA=0.75；面板位置：HKA/InOut/XO 固定左上；Tiptoe 固定右上。
+    - XO 的文字顏色沿用 xo.py（異常=紅，正常=綠）；其餘樣式與面板一致。
 
-• 輸入：未指定 --video 時直接開檔選單。
+• 輸入：未指定 --video 時開檔選單。
 • 輸出：未指定 --out → <來源>_annotated.mp4；--out none 不存檔。
 
 依賴：opencv-python, mediapipe, PyQt5, numpy
-mediapipe版本10.14
 """
 
+from __future__ import annotations
 import sys, os, cv2, argparse
 import numpy as np
 import mediapipe as mp
-from collections import deque, Counter
-from typing import Optional, Any, Dict, Mapping, Sequence, Tuple
+from collections import deque
+from typing import Optional, Any, Dict, Tuple
 from math import acos, degrees
 from PyQt5 import QtWidgets, QtGui, QtCore
 from PyQt5.QtWidgets import QFileDialog
+
+# for drawing pose skeleton
+mp_drawing = mp.solutions.drawing_utils
+mp_styles  = mp.solutions.drawing_styles
 
 # ========================= 統一外觀設定 =========================
 FONT            = cv2.FONT_HERSHEY_COMPLEX
 HUD_TEXT_COLOR  = (255, 0, 0)
 HUD_TEXT_THICK  = 1
 PANEL_BG_COLOR  = (255, 255, 255)
-PANEL_ALPHA     = 0.75     # 三模式一致
-PANEL_W_RATIO   = 0.50     # 只用在 Tiptoe 右上 HUD
+PANEL_ALPHA     = 0.75
+PANEL_W_RATIO   = 0.50
 SEG_COLOR       = (180, 180, 180)
 DOT_COLOR       = (0, 200, 0)
 DOT_RADIUS      = 4
@@ -60,8 +66,9 @@ ANGLE_DEF        = 'KAT'  # 'KAT' 或 'HAT'
 CLS_MAX_FRAMES  = 480
 CLS_MIN_VALID   = 150
 TIPTOE_RATIO_TH = 0.15
-INOUT_RATIO_TH  = 0.40  # 內/外八佔比門檻
-BURN_IN         = 30    # ★ 暖機幀：前 30 幀不計入比例
+INOUT_RATIO_TH  = 0.40
+XO_RATIO_TH     = 0.25
+BURN_IN         = 30
 
 # ========================= 小工具（SMA/EMA/角度） =========================
 class SMA:
@@ -87,7 +94,7 @@ def angle_between(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
     cos = np.clip(np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6), -1.0, 1.0)
     return np.degrees(np.arccos(cos))
 
-# ========================= In/Out-Toeing：工具與分析 =========================
+# ========================= In/Out-Toeing 工具與分析 =========================
 def _normalize(v: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(v);  return v if n == 0 else v / n
 
@@ -106,15 +113,12 @@ def draw_body_forward(image, center_xy, forward_vec_xz, scale=100, color=(255,0,
 
 def analyze_inout_frame(lm, prev: Optional[Dict[str,Any]] = None,
                         th: Optional[Dict[str,float]] = None) -> Tuple[Dict[str,Any], Dict[str,Any]]:
-    """單幀內/外八分析（含 EMA 與身體前向估計）。"""
     if th is None:
         th = {"high": 8.0, "low": 3.0, "ema": 0.2, "hip_rot": 15.0}
     if prev is None:
         prev = {"left_leg":"Neutral","right_leg":"Neutral",
                 "ema_angle":{"left":None,"right":None},
                 "bf_vec":None,"hip_trace":deque(maxlen=15)}
-
-    # 估計身體前向（依髖中心在 XZ 的位移）
     hip_l, hip_r = lm[23], lm[24]
     hip_center = np.array([(hip_l.x+hip_r.x)/2.0, (hip_l.y+hip_r.y)/2.0, (hip_l.z+hip_r.z)/2.0], float)
     hip_xz = hip_center[[0,2]]
@@ -129,17 +133,15 @@ def analyze_inout_frame(lm, prev: Optional[Dict[str,Any]] = None,
     else:
         bf = np.array([1.0,0.0,0.0])
     result = {}
-    for side, idxs in (("left",(29,31)), ("right",(30,32))):  # heel, toe
+    for side, idxs in (("left",(29,31)), ("right",(30,32))):
         heel = lm[idxs[0]]; toe = lm[idxs[1]]
         foot_vec_raw = np.array([toe.x-heel.x, toe.y-heel.y, toe.z-heel.z], float)
         foot_proj = _normalize(np.array([foot_vec_raw[0], 0.0, foot_vec_raw[2]]))
-        raw = prev["ema_angle"][side] or 0.0 if (np.linalg.norm(bf)<1e-5 or np.linalg.norm(foot_proj)<1e-5) else _ang(foot_proj, bf)
-        # EMA
+        raw = prev["ema_angle"][side] if (np.linalg.norm(bf) < 1e-5 or np.linalg.norm(foot_proj) < 1e-5) \
+              else _ang(foot_proj, bf)
         alpha = th["ema"]; prev_val = prev["ema_angle"][side]
         ema = raw if prev_val is None else alpha*raw + (1-alpha)*prev_val
         prev["ema_angle"][side] = ema
-
-        # 三態
         if prev.get(f"{side}_leg") == "In-Toed":
             label = "In-Toed" if ema < th["low"] else "Neutral"
         elif prev.get(f"{side}_leg") == "Out-Toed":
@@ -147,15 +149,12 @@ def analyze_inout_frame(lm, prev: Optional[Dict[str,Any]] = None,
         else:
             label = "In-Toed" if ema < th["low"] else ("Out-Toed" if ema > th["high"] else "Neutral")
         prev[f"{side}_leg"] = label
-
-        # 髖內旋估計（大腿投影 vs 身體前向）
         knee = lm[25 if side=="left" else 26]
         hip  = lm[23 if side=="left" else 24]
         thigh = np.array([knee.x-hip.x, knee.y-hip.y, knee.z-hip.z], float)
         thigh_proj = _normalize(np.array([thigh[0], 0.0, thigh[2]]))
         hip_rot_angle = _ang(thigh_proj, bf)
         hip_rot_status = "Internally Rotated" if hip_rot_angle > th["hip_rot"] else "Neutral"
-
         result[f"{side}_leg"] = {
             "status": label,
             "foot_angle_deg": round(ema, 2),
@@ -179,16 +178,67 @@ def build_inout_lines(L:dict, R:dict) -> list[str]:
         f"Right hipRot : {R.get('hip_rotation_deg',0):.2f}",
     ]
 
-# ========================= 前置分類（擴充為 3 路） =========================
+# ========================= XO（X/O 型腿）核心：取點/量測/判斷 =========================
+O_LEG_KNEE_THRESHOLD_CM = 6.0
+X_LEG_ANKLE_THRESHOLD_CM = 8.0
+ASSUMED_HEIGHT_CM = 150.0
+
+def _dist_px(p1, p2, W, H):
+    x1, y1 = p1[0]*W, p1[1]*H
+    x2, y2 = p2[0]*W, p2[1]*H
+    return float(np.hypot(x2-x1, y2-y1))
+
+def _leg_points_from_lm(lm2d):
+    try:
+        return {
+            'left_hip':   (lm2d[23].x, lm2d[23].y),
+            'right_hip':  (lm2d[24].x, lm2d[24].y),
+            'left_knee':  (lm2d[25].x, lm2d[25].y),
+            'right_knee': (lm2d[26].x, lm2d[26].y),
+            'left_ankle': (lm2d[27].x, lm2d[27].y),
+            'right_ankle':(lm2d[28].x, lm2d[28].y),
+        }
+    except Exception:
+        return None
+
+def _estimate_height_pixels(points, W, H):
+    L = _dist_px(points['left_hip'], points['left_ankle'], W, H)
+    R = _dist_px(points['right_hip'], points['right_ankle'], W, H)
+    leg_avg = (L+R)/2.0
+    return leg_avg * 2.0
+
+def _px_to_cm(dist_px, est_height_px, assumed_cm=ASSUMED_HEIGHT_CM):
+    cm_per_px = (assumed_cm / float(est_height_px+1e-6))
+    return dist_px * cm_per_px
+
+def analyze_xo(points, W, H):
+    knee_px  = _dist_px(points['left_knee'],  points['right_knee'],  W, H)
+    ankle_px = _dist_px(points['left_ankle'], points['right_ankle'], W, H)
+    est_h_px = _estimate_height_pixels(points, W, H)
+    knee_cm  = _px_to_cm(knee_px, est_h_px, ASSUMED_HEIGHT_CM)
+    ankle_cm = _px_to_cm(ankle_px, est_h_px, ASSUMED_HEIGHT_CM)
+    res = {
+        "knee_distance_cm": knee_cm,
+        "ankle_distance_cm": ankle_cm,
+        "knee_distance_px": knee_px,
+        "ankle_distance_px": ankle_px,
+        "o_leg": False, "o_severity": "false",
+        "x_leg": False, "x_severity": "false",
+    }
+    if knee_cm > O_LEG_KNEE_THRESHOLD_CM:
+        res["o_leg"] = True
+        res["o_severity"] = "true" if knee_cm > O_LEG_KNEE_THRESHOLD_CM*1.5 else "mild"
+    if ankle_cm > X_LEG_ANKLE_THRESHOLD_CM:
+        res["x_leg"] = True
+        res["x_severity"] = "true" if ankle_cm > X_LEG_ANKLE_THRESHOLD_CM*1.5 else "mild"
+    return res
+
+# ========================= 前置分類（4 路） =========================
 def classify_video(video_path: str) -> str:
-    """
-    回傳 'tiptoe' / 'inout' / 'hka'
-    先看 tiptoe 比例，否則看 in/out-toeing 比例，否則 hka。
-    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"無法開啟影片：{video_path}")
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH));  h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH));  H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     pose = mp.solutions.pose.Pose(
         static_image_mode=False, model_complexity=1,
@@ -202,30 +252,36 @@ def classify_video(video_path: str) -> str:
     valid = 0
     tiptoe_frames = 0
     inout_frames  = 0
+    xo_frames     = 0
     inout_prev = None
+    i = 0
 
-    # ★ 用 i 當索引，才能套用 BURN_IN
-    for i in range(CLS_MAX_FRAMES):
+    while i < CLS_MAX_FRAMES:
         ok, frame = cap.read()
         if not ok: break
+        i += 1
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         res = pose.process(rgb)
-        if not res.pose_landmarks:
+        if not res.pose_landmarks: continue
+
+        # 暖機：跳過比例統計，但累積 EMA
+        if i <= BURN_IN:
+            lm2d = res.pose_landmarks.landmark
+            _ = ema2d[25].push(np.array([lm2d[25].x*W, lm2d[25].y*H], float))
             continue
 
         lm2d = res.pose_landmarks.landmark
         world = res.pose_world_landmarks.landmark if res.pose_world_landmarks else None
 
-        def get2d(i2):
-            u = lm2d[i2]; return ema2d[i2].push(np.array([u.x*w, u.y*h], float))
-        def get3d(i2):
+        def get2d(idx):
+            u = lm2d[idx]; return ema2d[idx].push(np.array([u.x*W, u.y*H], float))
+        def get3d(idx):
             if world is None:
-                x,y = get2d(i2); pt = np.array([x, y, 0.0], float)
+                x,y = get2d(idx); pt = np.array([x, y, 0.0], float)
             else:
-                u = world[i2];   pt = np.array([u.x, u.y, u.z], float)
-            return ema3d[i2].push(pt)
+                u = world[idx];   pt = np.array([u.x, u.y, u.z], float)
+            return ema3d[idx].push(pt)
 
-        # tiptoe 指標
         L_KNEE, L_ANK, L_HEEL, L_TOE = 25, 27, 29, 31
         R_KNEE, R_ANK, R_HEEL, R_TOE = 26, 28, 30, 32
         if ANGLE_DEF.upper() == 'KAT':
@@ -239,36 +295,35 @@ def classify_video(video_path: str) -> str:
         left_tiptoe  = (L_pf > PF_THRESHOLD_DEG) and (lm2d[L_TOE].y < lm2d[L_HEEL].y)
         right_tiptoe = (R_pf > PF_THRESHOLD_DEG) and (lm2d[R_TOE].y < lm2d[R_HEEL].y)
 
-        # in/out-toeing 指標
         analysis, inout_prev = analyze_inout_frame(lm2d, prev=inout_prev)
         any_inout = (analysis["left_leg"]["status"]  != "Neutral") or \
                     (analysis["right_leg"]["status"] != "Neutral")
 
-        # ★ 暖機幀：前 BURN_IN 幀不計入比例（不進分母/分子）
-        if i < BURN_IN:
-            continue
+        pts = _leg_points_from_lm(lm2d)
+        any_xo = False
+        if pts is not None:
+            xo_res = analyze_xo(pts, W, H)
+            any_xo = xo_res["o_leg"] or xo_res["x_leg"]
 
-        # 正式計分
         valid += 1
-        if left_tiptoe or right_tiptoe:
-            tiptoe_frames += 1
-        if any_inout:
-            inout_frames += 1
+        if left_tiptoe or right_tiptoe: tiptoe_frames += 1
+        if any_inout: inout_frames += 1
+        if any_xo:    xo_frames    += 1
 
     cap.release(); pose.close()
 
-    if valid < max(CLS_MIN_VALID, int(0.3 * CLS_MAX_FRAMES)):
+    if valid < max(CLS_MIN_VALID, int(0.3 * (CLS_MAX_FRAMES - BURN_IN))):
         print(f"[Classify] valid={valid} < minimum, fallback=hka")
         return "hka"
 
     tiptoe_ratio = tiptoe_frames / float(valid)
     inout_ratio  = inout_frames  / float(valid)
-    print(f"[Classify] valid={valid}, tiptoe={tiptoe_frames} ({tiptoe_ratio:.3f}), inout={inout_frames} ({inout_ratio:.3f})")
+    xo_ratio     = xo_frames     / float(valid)
+    print(f"[Classify] valid={valid}, tiptoe={tiptoe_frames} ({tiptoe_ratio:.3f}), inout={inout_frames} ({inout_ratio:.3f}), xo={xo_frames} ({xo_ratio:.3f})")
 
-    if tiptoe_ratio >= TIPTOE_RATIO_TH:
-        return "tiptoe"
-    if inout_ratio  >= INOUT_RATIO_TH:
-        return "inout"
+    if tiptoe_ratio >= TIPTOE_RATIO_TH: return "tiptoe"
+    if inout_ratio  >= INOUT_RATIO_TH:  return "inout"
+    if xo_ratio     >= XO_RATIO_TH:     return "xo"
     return "hka"
 
 # ========================= Tiptoe Viewer（右上 HUD） =========================
@@ -327,13 +382,12 @@ class TiptoeViewer(QtWidgets.QMainWindow):
             L_pf = self.sma_pf["L"].push(L_raw);  R_pf = self.sma_pf["R"].push(R_raw)
             left_tiptoe  = (L_pf > PF_THRESHOLD_DEG) and (lm2d[L_TOE].y < lm2d[L_HEEL].y)
             right_tiptoe = (R_pf > PF_THRESHOLD_DEG) and (lm2d[R_TOE].y < lm2d[R_HEEL].y)
-            # 下肢簡化關聯線
+            # 最小骨架
             self._draw_side_min(frame, lm2d, 25, 27, 31, 29); self._draw_side_min(frame, lm2d, 26, 28, 32, 30)
             if left_tiptoe:  L_show = float(L_pf)
             if right_tiptoe: R_show = float(R_pf)
             if left_tiptoe or right_tiptoe:
                 gait_txt = "Tiptoe"; self.tiptoe_frames += 1
-        # 右上 HUD
         fs, line_h, pad = fixed_font_metrics(self.text_px)
         lines = [f"Left ankle angle:  {('N/A' if L_show is None else f'{L_show:.2f}')} deg",
                  f"Right ankle angle: {('N/A' if R_show is None else f'{R_show:.2f}')} deg",
@@ -478,7 +532,7 @@ class InOutViewer(QtWidgets.QMainWindow):
         self.pose = mp.solutions.pose.Pose(static_image_mode=False, model_complexity=2,
                                            min_detection_confidence=0.6, min_tracking_confidence=0.6,
                                            smooth_landmarks=True)
-        self.prev = None  # in/out 的 EMA 與 body-forward 狀態
+        self.prev = None
         self.timer = QtCore.QTimer(self); self.timer.timeout.connect(self._next_frame)
         self.timer.start(int(1000 / self.fps))
 
@@ -489,19 +543,16 @@ class InOutViewer(QtWidgets.QMainWindow):
         res = self.pose.process(rgb)
         if res.pose_landmarks:
             lm = res.pose_landmarks.landmark
-            analysis, self.prev = analyze_inout_frame(lm, prev=self.prev)
 
-            # ① 先畫骨架
-            du = mp.solutions.drawing_utils
-            du.draw_landmarks(
+            # ✅ 重新啟用骨架與連線（相容舊版 MediaPipe：不呼叫 get_default_pose_connections_style）
+            mp_drawing.draw_landmarks(
                 frame,
                 res.pose_landmarks,
                 mp.solutions.pose.POSE_CONNECTIONS,
-                du.DrawingSpec(color=(255, 255, 255), thickness=2, circle_radius=2),  # 關節點：白
-                du.DrawingSpec(color=(180, 0, 255), thickness=2),                    # 連線：紫
+                landmark_drawing_spec=mp_styles.get_default_pose_landmarks_style()
             )
 
-            # ② 足向量箭頭 + 身體前向箭頭
+            analysis, self.prev = analyze_inout_frame(lm, prev=self.prev)
             h, w = frame.shape[:2]
             for side, (heel_idx, toe_idx, color) in (
                 ("left", (29,31, (0,255,0))),
@@ -511,11 +562,8 @@ class InOutViewer(QtWidgets.QMainWindow):
                 heel_xy = np.array([heel.x*w, heel.y*h]);  toe_xy = np.array([toe.x*w, toe.y*h])
                 v = toe_xy - heel_xy;  v = v / (np.linalg.norm(v)+1e-6)
                 draw_arrow(frame, heel_xy, v, color=color, scale=100, thickness=2)
-
             hc = analysis["hip_center_xy"]; bf = analysis["bf_vec"]
             draw_body_forward(frame, (hc[0]*w, hc[1]*h), bf, scale=100, color=(255,0,255))
-
-            # ③ 左上面板
             fs, line_h, pad = fixed_font_metrics(self.text_px)
             lines = build_inout_lines(analysis["left_leg"], analysis["right_leg"])
             text_sizes = [cv2.getTextSize(t, FONT, fs, HUD_TEXT_THICK)[0] for t in lines]
@@ -529,7 +577,85 @@ class InOutViewer(QtWidgets.QMainWindow):
             for ln in lines:
                 cv2.putText(frame, ln, (x0+pad, y), FONT, fs, HUD_TEXT_COLOR, HUD_TEXT_THICK, cv2.LINE_AA)
                 y += line_h
+        if self.writer: self.writer.write(frame)
+        qimg = QtGui.QImage(frame.data, frame.shape[1], frame.shape[0], frame.strides[0], QtGui.QImage.Format_BGR888)
+        self.label.setPixmap(QtGui.QPixmap.fromImage(qimg))
 
+    def _finish(self):
+        self.timer.stop(); self.cap.release()
+        if self.writer: self.writer.release()
+        self.pose.close()
+        QtWidgets.QMessageBox.information(self, "完成", "播放完畢！"); QtWidgets.qApp.quit()
+
+# ========================= XO Viewer（左上面板；保留文字顏色） =========================
+class XOViewer(QtWidgets.QMainWindow):
+    def __init__(self, video_path: str, out_path: Optional[str], text_px: int):
+        super().__init__()
+        self.text_px = max(8, int(text_px))
+        self.cap = cv2.VideoCapture(video_path)
+        if not self.cap.isOpened(): raise RuntimeError(f"無法開啟影片：{video_path}")
+        self.fps    = self.cap.get(cv2.CAP_PROP_FPS) or 30
+        self.width  = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.resize(self.width, self.height)
+        self.writer = None
+        if out_path:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            self.writer = cv2.VideoWriter(out_path, fourcc, self.fps, (self.width, self.height))
+        self.label = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter); self.setCentralWidget(self.label)
+        self.pose = mp.solutions.pose.Pose(static_image_mode=False, model_complexity=2,
+                                           min_detection_confidence=0.6, min_tracking_confidence=0.6,
+                                           smooth_landmarks=True)
+        self.timer = QtCore.QTimer(self); self.timer.timeout.connect(self._next_frame)
+        self.timer.start(int(1000 / self.fps))
+
+    def _next_frame(self):
+        ok, frame = self.cap.read()
+        if not ok: self._finish(); return
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        res = self.pose.process(rgb)
+        if res.pose_landmarks:
+            lm2d = res.pose_landmarks.landmark
+            pts = _leg_points_from_lm(lm2d)
+            if pts is not None:
+                h, w = frame.shape[:2]
+                def P(key): return (int(pts[key][0]*w), int(pts[key][1]*h))
+                cv2.line(frame, P('left_hip'),  P('left_knee'),  (255,0,0), 2)
+                cv2.line(frame, P('left_knee'), P('left_ankle'), (255,0,0), 2)
+                cv2.line(frame, P('right_hip'), P('right_knee'), (0,0,255), 2)
+                cv2.line(frame, P('right_knee'),P('right_ankle'),(0,0,255), 2)
+                cv2.line(frame, P('left_knee'),  P('right_knee'),  (0,255,255), 3)
+                cv2.line(frame, P('left_ankle'), P('right_ankle'), (255,255,0), 3)
+                for key, color in {'left_hip':(255,0,0),'right_hip':(255,0,0),
+                                   'left_knee':(0,255,0),'right_knee':(0,255,0),
+                                   'left_ankle':(0,0,255),'right_ankle':(0,0,255)}.items():
+                    cv2.circle(frame, P(key), 6, color, -1)
+                res_xo = analyze_xo(pts, w, h)
+                if res_xo["o_leg"]:
+                    o_text  = f"O-shaped legs: {res_xo['o_severity']} ({res_xo['knee_distance_cm']:.1f}cm)"
+                    o_color = (0,0,255)
+                else:
+                    o_text  = f"O-shaped legs: normal ({res_xo['knee_distance_cm']:.1f}cm)"
+                    o_color = (0,255,0)
+                if res_xo["x_leg"]:
+                    x_text  = f"X-shaped legs: {res_xo['x_severity']} ({res_xo['ankle_distance_cm']:.1f}cm)"
+                    x_color = (0,0,255)
+                else:
+                    x_text  = f"X-shaped legs: normal ({res_xo['ankle_distance_cm']:.1f}cm)"
+                    x_color = (0,255,0)
+                fs, line_h, pad = fixed_font_metrics(self.text_px)
+                lines = [o_text, x_text]
+                sizes = [cv2.getTextSize(t, FONT, fs, HUD_TEXT_THICK)[0] for t in lines]
+                box_w = max(s[0] for s in sizes) + pad*2
+                box_h = pad*2 + line_h*len(lines)
+                x0, y0 = 10, 10
+                overlay = frame.copy()
+                cv2.rectangle(overlay, (x0, y0), (x0+box_w, y0+box_h), PANEL_BG_COLOR, -1)
+                cv2.addWeighted(overlay, PANEL_ALPHA, frame, 1-PANEL_ALPHA, 0, frame)
+                y = y0 + pad + line_h - int(line_h*0.3)
+                for t, c in ((o_text, o_color), (x_text, x_color)):
+                    cv2.putText(frame, t, (x0+pad, y), FONT, fs, c, HUD_TEXT_THICK, cv2.LINE_AA)
+                    y += line_h
         if self.writer: self.writer.write(frame)
         qimg = QtGui.QImage(frame.data, frame.shape[1], frame.shape[0], frame.strides[0], QtGui.QImage.Format_BGR888)
         self.label.setPixmap(QtGui.QPixmap.fromImage(qimg))
@@ -542,11 +668,12 @@ class InOutViewer(QtWidgets.QMainWindow):
 
 # ========================= 主入口 =========================
 def main():
-    ap = argparse.ArgumentParser(description="Auto Gait Router: tiptoe / hka / inout")
+    ap = argparse.ArgumentParser(description="Auto Gait Router: tiptoe / hka / inout / xo")
     ap.add_argument("--video", help="影片路徑；空白會直接開檔案選擇視窗")
     ap.add_argument("--out",   default="", help="輸出影片；留空=自動 *_annotated.mp4；'none' 不存檔")
-    ap.add_argument("--force", choices=["auto","tiptoe","hka","inout","longshort","lld","intoe","outtoe"],
-                    default="auto", help="強制模式（auto=自動；inout/intoe/outtoe 都跑內/外八；longshort/lld=HKA）")
+    ap.add_argument("--force", choices=["auto","tiptoe","hka","inout","xo",
+                                        "longshort","lld","intoe","outtoe","xleg","oleg"],
+                    default="auto", help="強制模式（auto=自動；inout/intoe/outtoe 都跑內/外八；longshort/lld=HKA；xleg/oleg=XO）")
     ap.add_argument("--text-px", type=int, default=DEFAULT_TEXT_PX, help="固定字高（像素），預設 10")
     args = ap.parse_args()
 
@@ -558,18 +685,19 @@ def main():
             print("未選擇影片，程式結束。"); return
         video_path = fname
     else:
-        video_path = args.video.strip('"')
+        video_path = args.video.strip('\"')
 
-    out_path = args.out.strip('"')
+    out_path = args.out.strip('\"')
     if not out_path:
         root, _ = os.path.splitext(video_path); out_path = root + "_annotated.mp4"
     if out_path.lower() in ("none","null","no","-"): out_path = None
 
     mode = args.force
     if mode == "auto":
-        mode = classify_video(video_path)  # 'tiptoe' / 'inout' / 'hka'
+        mode = classify_video(video_path)  # 'tiptoe' / 'inout' / 'xo' / 'hka'
     if mode in ("longshort","lld"): mode = "hka"
     if mode in ("intoe","outtoe"):  mode = "inout"
+    if mode in ("xleg","oleg"):     mode = "xo"
 
     text_px = max(8, int(args.text_px))
     if mode == "tiptoe":
@@ -578,6 +706,9 @@ def main():
     elif mode == "inout":
         viewer = InOutViewer(video_path, out_path, text_px)
         viewer.setWindowTitle("Gait Analyzer – In/Out-Toeing")
+    elif mode == "xo":
+        viewer = XOViewer(video_path, out_path, text_px)
+        viewer.setWindowTitle("Gait Analyzer – XO (X/O-shaped legs)")
     else:
         viewer = HKAViewer(video_path, out_path, text_px)
         viewer.setWindowTitle("Gait Analyzer – HKA (Long/Short)")

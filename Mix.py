@@ -65,11 +65,11 @@ HKA_EMA_ALPHA    = 0.22
 HKA_SMA_WIN      = 9         # 六個角度再做 SMA，讓數字更穩
 
 # ========================= 自動分流參數（保守） =========================
-CLS_MAX_FRAMES  = 900        # 觀察更久
-CLS_MIN_VALID   = 250        # 最少有效幀
+CLS_MAX_FRAMES  = 600        # 觀察上限
+CLS_MIN_VALID   = 180        # 至少 6 秒有效步態
 TIPTOE_RATIO_TH = 0.25       # 要至少 25% 幀踮腳才分到 tiptoe
 INOUT_RATIO_TH  = 0.55       # 要至少 55% 幀出現內/外八才分到 inout
-BURN_IN         = 90         # 暖機幀：前 90 幀不計入比例
+BURN_IN         = 45         # 暖機 1.5 秒
 
 # ========================= 小工具（SMA/EMA/角度） =========================
 class SMA:

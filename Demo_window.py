@@ -6,14 +6,17 @@ Gait Demo GUI (PyQt5)
 把 Demo_window.py 的展示介面，與 Mix.py 的「辨識姿態/步態」功能結合成同一個視窗作品。
 
 重點：
-- 不更動 Mix.py 的辨識/疊字/計算邏輯：全部沿用 Mix.py 的 classify_video 與四個 Viewer。
+- 不更動 Mix.py 的辨識/疊字/計算邏輯：全部沿用 Mix.py 的四個 Viewer。
 - 只做「UI 整合」：把原本會獨立開視窗的 Viewer，嵌到 DemoWindow 左側的影片顯示區。
 - 為了避免影片播完就整個 App 退出（Mix.py 原本會 qApp.quit()），這裡用子類別覆寫 _finish()：
   只停止播放並釋放資源，不退出 DemoWindow。
 
+注意：
+- 本版本已移除「自動辨識」相關的 UI 與功能（僅保留手動選擇分析模式）。
+
 使用方式：
 - 將本檔案與 Mix.py 放在同一個資料夾
-- 執行：python GaitDemoApp.py
+- 執行：python Demo_window_no_auto.py
 """
 
 from __future__ import annotations
@@ -173,40 +176,16 @@ class EmbeddedXOViewer(_EmbeddedViewerMixin, mix.XOViewer):
 
 
 # -----------------------------
-# Auto 分類（避免 UI 卡死）
-# -----------------------------
-class ClassifyWorker(QtCore.QObject):
-    finished = QtCore.pyqtSignal(str)  # mode
-    error = QtCore.pyqtSignal(str)
-
-    def __init__(self, video_path: str):
-        super().__init__()
-        self.video_path = video_path
-
-    @QtCore.pyqtSlot()
-    def run(self):
-        try:
-            mode = mix.classify_video(self.video_path)
-            self.finished.emit(mode)
-        except Exception as e:
-            self.error.emit(f"{e}\n\n{traceback.format_exc()}")
-
-
-# -----------------------------
 # Demo 主視窗
 # -----------------------------
 class DemoWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("幼童步態自動辨識系統 Demo")
+        self.setWindowTitle("幼童步態分析系統 Demo")
         self.resize(1200, 800)
 
         self.video_path: Optional[str] = None
         self._viewer: Optional[QtWidgets.QWidget] = None
-
-        # 自動分類 thread
-        self._cls_thread: Optional[QtCore.QThread] = None
-        self._cls_worker: Optional[ClassifyWorker] = None
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -251,13 +230,13 @@ class DemoWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(widget)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        title = QtWidgets.QLabel("幼童步態自動辨識系統 Demo")
+        title = QtWidgets.QLabel("幼童步態分析系統 Demo")
         title_font = QtGui.QFont()
         title_font.setPointSize(20)
         title_font.setBold(True)
         title.setFont(title_font)
 
-        subtitle = QtWidgets.QLabel("Auto Gait Analysis for Children")
+        subtitle = QtWidgets.QLabel("Gait Analysis for Children")
         subtitle.setStyleSheet("color: gray;")
 
         layout.addWidget(title)
@@ -299,15 +278,16 @@ class DemoWindow(QtWidgets.QMainWindow):
         mode_group = QtWidgets.QGroupBox("分析模式選擇")
         mode_layout = QtWidgets.QVBoxLayout(mode_group)
 
-        self.radio_auto = QtWidgets.QRadioButton("自動辨識")
+        # 已移除「自動辨識」選項：僅保留手動分析模式
         self.radio_tiptoe = QtWidgets.QRadioButton("踮腳步態（Tiptoe）")
         self.radio_inout = QtWidgets.QRadioButton("內 / 外八（In / Out）")
         self.radio_xo = QtWidgets.QRadioButton("X / O 型腿（XO）")
         self.radio_hka = QtWidgets.QRadioButton("HKA（長短腳）")
 
-        self.radio_auto.setChecked(True)
+        # 預設選第一個模式（避免空狀態）
+        self.radio_tiptoe.setChecked(True)
 
-        for rb in (self.radio_auto, self.radio_tiptoe, self.radio_inout, self.radio_xo, self.radio_hka):
+        for rb in (self.radio_tiptoe, self.radio_inout, self.radio_xo, self.radio_hka):
             rb.toggled.connect(self._update_current_mode)
             mode_layout.addWidget(rb)
 
@@ -317,7 +297,7 @@ class DemoWindow(QtWidgets.QMainWindow):
         status_group = QtWidgets.QGroupBox("目前分析模式")
         status_layout = QtWidgets.QVBoxLayout(status_group)
 
-        self.current_mode_label = QtWidgets.QLabel("AUTO")
+        self.current_mode_label = QtWidgets.QLabel("TIPTOE")
         self.current_mode_label.setAlignment(QtCore.Qt.AlignCenter)
         font = QtGui.QFont()
         font.setPointSize(26)
@@ -358,8 +338,6 @@ class DemoWindow(QtWidgets.QMainWindow):
     # Helpers
     # ------------------------------------------------------------------
     def _selected_mode(self) -> str:
-        if self.radio_auto.isChecked():
-            return "auto"
         if self.radio_tiptoe.isChecked():
             return "tiptoe"
         if self.radio_inout.isChecked():
@@ -368,7 +346,8 @@ class DemoWindow(QtWidgets.QMainWindow):
             return "xo"
         if self.radio_hka.isChecked():
             return "hka"
-        return "auto"
+        # 保底：避免任何原因導致無選取時回傳空值
+        return "tiptoe"
 
     def _mode_to_label(self, mode: str) -> str:
         mode = (mode or "").lower()
@@ -380,17 +359,13 @@ class DemoWindow(QtWidgets.QMainWindow):
             return "XO"
         if mode == "hka":
             return "HKA"
-        return "AUTO"
+        # 保底：不顯示 AUTO
+        return "TIPTOE"
 
     def _default_out_path(self, video_path: str) -> Optional[str]:
         # 沿用 Mix.py 的預設行為：輸出 <來源>_annotated.mp4
         root, _ = os.path.splitext(video_path)
         return root + "_annotated.mp4"
-
-    def _set_busy(self, busy: bool):
-        self.btn_start.setEnabled(not busy)
-        self.btn_open.setEnabled(not busy)
-        self.btn_reset.setEnabled(not busy)
 
     def _clear_viewer(self):
         if self._viewer is None:
@@ -429,7 +404,7 @@ class DemoWindow(QtWidgets.QMainWindow):
     # Slots
     # ------------------------------------------------------------------
     def _update_current_mode(self):
-        # 顯示「目前分析模式」：就跟著你在右側選的類別（AUTO/ TIPTOE/ INOUT/ XO/ HKA）
+        # 顯示「目前分析模式」：跟著右側選的類別（TIPTOE / INOUT / XO / HKA）
         label = self._mode_to_label(self._selected_mode())
         self.current_mode_label.setText(label)
 
@@ -451,14 +426,8 @@ class DemoWindow(QtWidgets.QMainWindow):
             if not self.video_path:
                 return
 
-        mode = self._selected_mode()
-
-        # auto：先做 classify，再開對應 viewer（與 Mix.py 原本邏輯一致）
-        if mode == "auto":
-            self._start_auto_classify(self.video_path)
-            return
-
         # 手動：直接開對應 viewer
+        mode = self._selected_mode()
         self._launch_viewer(self.video_path, mode)
 
     def on_reset(self):
@@ -468,48 +437,6 @@ class DemoWindow(QtWidgets.QMainWindow):
         self.video_placeholder.setText("分析畫面顯示區\n（請先選擇影片）")
         self.video_placeholder.show()
         self._update_current_mode()
-
-    # ------------------------------------------------------------------
-    # Auto classify (thread)
-    # ------------------------------------------------------------------
-    def _start_auto_classify(self, video_path: str):
-        # 若已有 thread 先清掉
-        if self._cls_thread is not None:
-            try:
-                self._cls_thread.quit()
-                self._cls_thread.wait(300)
-            except Exception:
-                pass
-            self._cls_thread = None
-            self._cls_worker = None
-
-        self._set_busy(True)
-        self.current_mode_label.setText("AUTO")
-
-        self._cls_thread = QtCore.QThread(self)
-        self._cls_worker = ClassifyWorker(video_path)
-        self._cls_worker.moveToThread(self._cls_thread)
-
-        self._cls_thread.started.connect(self._cls_worker.run)
-        self._cls_worker.finished.connect(self._on_auto_classified)
-        self._cls_worker.error.connect(self._on_auto_error)
-
-        self._cls_worker.finished.connect(self._cls_thread.quit)
-        self._cls_worker.error.connect(self._cls_thread.quit)
-        self._cls_thread.finished.connect(self._cls_thread.deleteLater)
-
-        self._cls_thread.start()
-
-    def _on_auto_classified(self, mode: str):
-        self._set_busy(False)
-        # 這裡顯示「目前分析模式」為自動分到的類別
-        self.current_mode_label.setText(self._mode_to_label(mode))
-        if self.video_path:
-            self._launch_viewer(self.video_path, mode)
-
-    def _on_auto_error(self, msg: str):
-        self._set_busy(False)
-        QtWidgets.QMessageBox.critical(self, "自動辨識失敗", msg)
 
     # ------------------------------------------------------------------
     # Launch viewer

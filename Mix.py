@@ -43,7 +43,7 @@ mp_pose     = mp.solutions.pose
 
 # ========================= 統一外觀設定 =========================
 FONT            = cv2.FONT_HERSHEY_COMPLEX
-HUD_TEXT_COLOR  = (255, 0, 0)     # BGR（藍色系字體）
+HUD_TEXT_COLOR  = (255, 0, 0)     # BGR（藍色系字體）(已不再用於文字顏色，保留以免其他處用到)
 HUD_TEXT_THICK  = 1
 PANEL_BG_COLOR  = (255, 255, 255)
 PANEL_ALPHA     = 0.75            # 四模式一致
@@ -61,6 +61,14 @@ def fixed_font_metrics(target_px: int, thickness: int = HUD_TEXT_THICK, sample_t
     line_h = int(target_px + max(4, target_px * 0.2))
     pad    = int(max(8, target_px * 0.6))
     return font_scale, line_h, pad
+
+# ======= 判定顏色：符合(判定條件)→紅，否則→綠 =======
+def passfail_color(is_match: bool):
+    """OpenCV BGR：True->Red, False->Green"""
+    return (0, 0, 255) if bool(is_match) else (0, 255, 0)
+
+# HKA 左右差異門檻（度）：超過視為「符合判定條件」→紅
+HKA_DIFF_THRESHOLD_DEG = 10.0
 
 # ========================= 平滑與門檻（穩定版，固定數值） =========================
 # Tiptoe / InOut 都會使用到
@@ -402,12 +410,12 @@ class TiptoeViewer(QtWidgets.QMainWindow):
         lines = [f"Left ankle angle:  {('N/A' if L_show is None else f'{L_show:.2f}')} deg",
                  f"Right ankle angle: {('N/A' if R_show is None else f'{R_show:.2f}')} deg",
                  f"Gait: {gait_txt}"]
-        self._draw_info_panel_top_right(frame, lines, fs, line_h, pad)
+        self._draw_info_panel_top_right(frame, lines, fs, line_h, pad, passfail_color(gait_txt == 'Tiptoe'))
         if self.writer: self.writer.write(frame)
         qimg = QtGui.QImage(frame.data, frame.shape[1], frame.shape[0], frame.strides[0], QtGui.QImage.Format_BGR888)
         self.label.setPixmap(QtGui.QPixmap.fromImage(qimg)); self.frame_count += 1
 
-    def _draw_info_panel_top_right(self, frame, lines, font_scale, line_h, pad):
+    def _draw_info_panel_top_right(self, frame, lines, font_scale, line_h, pad, text_color):
         h, w = frame.shape[:2]; panel_w = int(w * PANEL_W_RATIO);  box_h = pad*2 + line_h*len(lines)
         x0, y0  = w - panel_w - 10, 10
         overlay = frame.copy()
@@ -415,7 +423,7 @@ class TiptoeViewer(QtWidgets.QMainWindow):
         cv2.addWeighted(overlay, PANEL_ALPHA, frame, 1-PANEL_ALPHA, 0, frame)
         y = y0 + pad + line_h - int(line_h*0.3)
         for text in lines:
-            cv2.putText(frame, text, (x0+pad, y), FONT, font_scale, HUD_TEXT_COLOR, HUD_TEXT_THICK, cv2.LINE_AA)
+            cv2.putText(frame, text, (x0+pad, y), FONT, font_scale, text_color, HUD_TEXT_THICK, cv2.LINE_AA)
             y += line_h
 
     def _draw_side_min(self, frame, lm2d, K, A, T, H):
@@ -505,6 +513,16 @@ class HKAViewer(QtWidgets.QMainWindow):
             f"R-Knee:  {angles['R_knee']:.2f}"  if angles['R_knee']  is not None else "R-Knee:  --",
             f"R-Ankle: {angles['R_ankle']:.2f}" if angles['R_ankle'] is not None else "R-Ankle: --",
         ]
+        # HKA：以左右同名角度差是否超過門檻作為判定條件（超過→紅，否則→綠）
+        diffs = []
+        for key in ('hip','knee','ankle'):
+            lv = angles.get(f'L_{key}')
+            rv = angles.get(f'R_{key}')
+            if (lv is not None) and (rv is not None):
+                diffs.append(abs(float(lv) - float(rv)))
+        is_match = any(d > HKA_DIFF_THRESHOLD_DEG for d in diffs) if diffs else False
+        text_color = passfail_color(is_match)
+
         text_sizes = [cv2.getTextSize(t, FONT, font_scale, HUD_TEXT_THICK)[0] for t in lines]
         max_w = max(w for w, h in text_sizes)
         box_w = max_w + pad*2;  box_h = pad*2 + line_h*len(lines)
@@ -514,7 +532,7 @@ class HKAViewer(QtWidgets.QMainWindow):
         cv2.addWeighted(overlay, PANEL_ALPHA, frame, 1-PANEL_ALPHA, 0, frame)
         y = y0 + pad + line_h - int(line_h*0.3)
         for ln in lines:
-            cv2.putText(frame, ln, (x0+pad, y), FONT, font_scale, HUD_TEXT_COLOR, HUD_TEXT_THICK, cv2.LINE_AA)
+            cv2.putText(frame, ln, (x0+pad, y), FONT, font_scale, text_color, HUD_TEXT_THICK, cv2.LINE_AA)
             y += line_h
 
     def _finish(self):
@@ -578,6 +596,9 @@ class InOutViewer(QtWidgets.QMainWindow):
             # 左上面板（與其它模式同字級/透明度）
             fs, line_h, pad = fixed_font_metrics(self.text_px)
             lines = build_inout_lines(analysis["left_leg"], analysis["right_leg"])
+            is_match = (analysis["left_leg"]["status"] != "Neutral") or (analysis["right_leg"]["status"] != "Neutral")
+            text_color = passfail_color(is_match)
+
             text_sizes = [cv2.getTextSize(t, FONT, fs, HUD_TEXT_THICK)[0] for t in lines]
             max_w = max(wd for wd, hh in text_sizes)
             box_w = max_w + pad*2;  box_h = pad*2 + line_h*len(lines)
@@ -587,7 +608,7 @@ class InOutViewer(QtWidgets.QMainWindow):
             cv2.addWeighted(overlay, PANEL_ALPHA, frame, 1-PANEL_ALPHA, 0, frame)
             y = y0 + pad + line_h - int(line_h*0.3)
             for ln in lines:
-                cv2.putText(frame, ln, (x0+pad, y), FONT, fs, HUD_TEXT_COLOR, HUD_TEXT_THICK, cv2.LINE_AA)
+                cv2.putText(frame, ln, (x0+pad, y), FONT, fs, text_color, HUD_TEXT_THICK, cv2.LINE_AA)
                 y += line_h
         if self.writer: self.writer.write(frame)
         qimg = QtGui.QImage(frame.data, frame.shape[1], frame.shape[0], frame.strides[0], QtGui.QImage.Format_BGR888)

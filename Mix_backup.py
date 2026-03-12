@@ -110,330 +110,89 @@ def angle_between(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
     cos = np.clip(np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6), -1.0, 1.0)
     return np.degrees(np.arccos(cos))
 
-# ========================= In/Out-Toeing（內外八；移植 main_3_gui.py 邏輯） =========================
-# 角度平滑緩衝區大小
-INOUT_SMOOTH_WINDOW = 10
+# ========================= In/Out-Toeing（內外八） =========================
+def _normalize(v: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(v);  return v if n == 0 else v / n
 
-# 內外八判定閾值（度）
-NORMAL_MIN = -5
-NORMAL_MAX = 20
-MILD_MIN = -15
-MILD_MAX = 30
+def _ang(v1: np.ndarray, v2: np.ndarray) -> float:
+    dot = np.clip(np.dot(_normalize(v1), _normalize(v2)), -1.0, 1.0)
+    return degrees(acos(dot))
 
-# 膝蓋角度判定閾值
-KNEE_IN_TOEING_THRESHOLD = -15
-KNEE_OUT_TOEING_THRESHOLD = 8
-
-# 拍攝角度模式
-VIEW_ANGLE_FRONT = "front"
-VIEW_ANGLE_SIDE = "side"
-
-
-def normalize_vector(v: np.ndarray) -> np.ndarray:
-    norm = np.linalg.norm(v)
-    if norm < 1e-6:
-        return v
-    return v / norm
-
-
-def calculate_2d_angle(vec1: np.ndarray, vec2: np.ndarray) -> float:
-    cross = vec1[0] * vec2[1] - vec1[1] * vec2[0]
-    dot = np.dot(vec1, vec2)
-    angle = np.arctan2(abs(cross), dot)
-    return degrees(angle) if cross > 0 else -degrees(angle)
-
-
-def get_foot_direction_3d(heel_3d: np.ndarray, toe_3d: np.ndarray) -> np.ndarray:
-    vec = toe_3d - heel_3d
-    return normalize_vector(vec)
-
-
-def calculate_3d_angle_projection(vec1: np.ndarray, vec2: np.ndarray, plane: str = 'xy') -> float:
-    if plane == 'xy':
-        vec1_2d = np.array([vec1[0], vec1[1]], dtype=float)
-        vec2_2d = np.array([vec2[0], vec2[1]], dtype=float)
-    elif plane == 'yz':
-        vec1_2d = np.array([vec1[1], vec1[2]], dtype=float)
-        vec2_2d = np.array([vec2[1], vec2[2]], dtype=float)
-    else:
-        vec1_2d = np.array([vec1[0], vec1[2]], dtype=float)
-        vec2_2d = np.array([vec2[0], vec2[2]], dtype=float)
-
-    vec1_2d = normalize_vector(vec1_2d)
-    vec2_2d = normalize_vector(vec2_2d)
-    return calculate_2d_angle(vec1_2d, vec2_2d)
-
-
-def calculate_knee_valgus_angle(hip_3d: np.ndarray, knee_3d: np.ndarray, ankle_3d: np.ndarray,
-                                projection_plane: str = 'xy') -> float:
-    hip_to_knee = knee_3d - hip_3d
-
-    if projection_plane == 'xy':
-        ref_vec = np.array([0, 1], dtype=float)
-        knee_vec = np.array([hip_to_knee[0], hip_to_knee[1]], dtype=float)
-    elif projection_plane == 'yz':
-        ref_vec = np.array([1, 0], dtype=float)
-        knee_vec = np.array([hip_to_knee[1], hip_to_knee[2]], dtype=float)
-    else:
-        ref_vec = np.array([0, 1], dtype=float)
-        knee_vec = np.array([hip_to_knee[0], hip_to_knee[2]], dtype=float)
-
-    ref_vec = normalize_vector(ref_vec)
-    knee_vec = normalize_vector(knee_vec)
-    return calculate_2d_angle(knee_vec, ref_vec)
-
-
-def classify_angle(angle: float) -> str:
-    if NORMAL_MIN <= angle <= NORMAL_MAX:
-        return "Normal"
-    elif MILD_MIN <= angle < NORMAL_MIN:
-        return "In-toeing"
-    elif NORMAL_MAX < angle <= MILD_MAX:
-        return "Out-toeing"
-    elif angle < MILD_MIN:
-        return "Marked In-toeing"
-    else:
-        return "Marked Out-toeing"
-
-
-def classify_knee_angle(angle: float) -> str:
-    if angle < KNEE_IN_TOEING_THRESHOLD:
-        return "Knee inward"
-    elif angle > KNEE_OUT_TOEING_THRESHOLD:
-        return "Knee outward"
-    else:
-        return "Normal"
-
-
-class InOutFootAngleAnalyzer:
-    def __init__(self, smooth_window: int = INOUT_SMOOTH_WINDOW, view_angle: str = VIEW_ANGLE_FRONT):
-        self.left_angles = deque(maxlen=smooth_window)
-        self.right_angles = deque(maxlen=smooth_window)
-        self.left_knee_angles = deque(maxlen=smooth_window)
-        self.right_knee_angles = deque(maxlen=smooth_window)
-        self.view_angle = view_angle
-        self._setup_projection()
-
-    def _setup_projection(self):
-        if self.view_angle == VIEW_ANGLE_FRONT:
-            self.projection_plane = 'xy'
-            self.body_forward = np.array([0, 1, 0], dtype=float)
-        else:
-            self.projection_plane = 'yz'
-            self.body_forward = np.array([0, 0, -1], dtype=float)
-
-    def set_view_angle(self, view_angle: str):
-        self.view_angle = view_angle
-        self._setup_projection()
-
-    def analyze(self, keypoints: Optional[Dict[str, Any]]):
-        if keypoints is None:
-            return None
-
-        left_foot_dir = get_foot_direction_3d(keypoints['left_heel_3d'], keypoints['left_toe_3d'])
-        if self.view_angle == VIEW_ANGLE_SIDE:
-            left_angle = -calculate_3d_angle_projection(left_foot_dir, self.body_forward, self.projection_plane)
-        else:
-            left_angle = calculate_3d_angle_projection(left_foot_dir, self.body_forward, self.projection_plane)
-
-        right_foot_dir = get_foot_direction_3d(keypoints['right_heel_3d'], keypoints['right_toe_3d'])
-        if self.view_angle == VIEW_ANGLE_SIDE:
-            right_angle = -calculate_3d_angle_projection(right_foot_dir, self.body_forward, self.projection_plane)
-        else:
-            right_angle = -calculate_3d_angle_projection(right_foot_dir, self.body_forward, self.projection_plane)
-
-        left_knee_angle = None
-        right_knee_angle = None
-        if self.view_angle == VIEW_ANGLE_FRONT:
-            left_dist = np.linalg.norm(keypoints['left_ankle_3d'] - keypoints['left_hip_3d'])
-            if left_dist > 100:
-                left_knee_angle = calculate_knee_valgus_angle(
-                    keypoints['left_hip_3d'], keypoints['left_knee_3d'], keypoints['left_ankle_3d'], self.projection_plane
-                )
-
-            right_dist = np.linalg.norm(keypoints['right_ankle_3d'] - keypoints['right_hip_3d'])
-            if right_dist > 100:
-                right_knee_angle = calculate_knee_valgus_angle(
-                    keypoints['right_hip_3d'], keypoints['right_knee_3d'], keypoints['right_ankle_3d'], self.projection_plane
-                )
-                right_knee_angle = -right_knee_angle
-
-        self.left_angles.append(left_angle)
-        self.right_angles.append(right_angle)
-        if left_knee_angle is not None:
-            self.left_knee_angles.append(left_knee_angle)
-        if right_knee_angle is not None:
-            self.right_knee_angles.append(right_knee_angle)
-
-        left_angle_smooth = float(np.mean(self.left_angles))
-        right_angle_smooth = float(np.mean(self.right_angles))
-        left_knee_smooth = float(np.mean(self.left_knee_angles)) if self.left_knee_angles else None
-        right_knee_smooth = float(np.mean(self.right_knee_angles)) if self.right_knee_angles else None
-
-        crossover_angle = None
-        if left_angle_smooth < 0 or right_angle_smooth < 0:
-            crossover_angle = left_angle_smooth + right_angle_smooth
-
-        return {
-            'left': {
-                'angle': left_angle_smooth,
-                'status': classify_angle(left_angle_smooth),
-                'knee_angle': left_knee_smooth,
-                'knee_status': classify_knee_angle(left_knee_smooth) if left_knee_smooth is not None else None,
-            },
-            'right': {
-                'angle': right_angle_smooth,
-                'status': classify_angle(right_angle_smooth),
-                'knee_angle': right_knee_smooth,
-                'knee_status': classify_knee_angle(right_knee_smooth) if right_knee_smooth is not None else None,
-            },
-            'crossover_angle': crossover_angle,
-            'keypoints': keypoints,
-        }
-
-
-def extract_inout_keypoints(lm, image_width: int, image_height: int) -> Optional[Dict[str, Any]]:
-    indices = {
-        'left_heel': 29, 'left_toe': 31, 'left_hip': 23,
-        'left_knee': 25, 'left_ankle': 27,
-        'right_heel': 30, 'right_toe': 32, 'right_hip': 24,
-        'right_knee': 26, 'right_ankle': 28,
-    }
-
-    def get_coords(idx: int):
-        pt = lm[idx]
-        if getattr(pt, 'visibility', 1.0) < 0.5:
-            return None, None
-        coords_2d = np.array([pt.x * image_width, pt.y * image_height], dtype=float)
-        coords_3d = np.array([pt.x, pt.y, pt.z], dtype=float) * image_width
-        return coords_2d, coords_3d
-
-    keypoints = {}
-    for name, idx in indices.items():
-        coords_2d, coords_3d = get_coords(idx)
-        if coords_2d is None:
-            return None
-        keypoints[f'{name}_2d'] = tuple(coords_2d.astype(int))
-        keypoints[f'{name}_3d'] = coords_3d
-    return keypoints
-
-
-def build_inout_lines(analysis_result: Dict[str, Any]) -> list[str]:
-    left_data = analysis_result['left']
-    right_data = analysis_result['right']
-    crossover_angle = analysis_result.get('crossover_angle')
-
-    lines = [
-        'Left foot:',
-        f"Left knee: {left_data['knee_angle']:.1f} deg ({left_data['knee_status']})" if left_data['knee_angle'] is not None else 'Left knee: --',
-        '',
-        'Right foot:',
-        f"Right knee: {right_data['knee_angle']:.1f} deg ({right_data['knee_status']})" if right_data['knee_angle'] is not None else 'Right knee: --',
-        '',
-        f"Foot crossing: {crossover_angle:.1f} deg" if crossover_angle is not None and crossover_angle < 0 else 'Foot crossing: None',
-    ]
-
-    left_knee_in = (left_data['knee_status'] == 'Knee Inward')
-    right_knee_in = (right_data['knee_status'] == 'Knee Inward')
-    left_foot_out = 'Out-toeing' in left_data['status']
-    right_foot_out = 'Out-toeing' in right_data['status']
-    crossover_triggered = (crossover_angle is not None and crossover_angle < 0)
-
-    is_in_toeing = left_knee_in or right_knee_in or crossover_triggered
-    is_out_toeing = left_foot_out or right_foot_out
-
-    if is_in_toeing and is_out_toeing:
-        final_status = 'Overall: In-toeing / Out-toeing'
-    elif is_in_toeing:
-        final_status = 'Overall: In-toeing'
-    elif is_out_toeing:
-        final_status = 'Overall: Out-toeing'
-    else:
-        final_status = 'Overall: Normal'
-    lines.append('')
-    lines.append(final_status)
-    return lines
-
-
-def inout_get_status_color(status: str):
-    return (0, 255, 0) if status == 'Normal' else (0, 0, 255)
-
-
-def inout_get_knee_color(status: Optional[str]):
-    if status is None:
-        return (150, 150, 150)
-    if status == 'Normal':
-        return (0, 255, 0)
-    if 'In-toeing' in status or 'Out-toeing' in status or 'Knee' in status:
-        return (0, 0, 255)
-    return (0, 165, 255)
-
-
-def draw_arrow(image, origin_xy, vec_xy, color=(0, 255, 0), scale=100, thickness=2):
+def draw_arrow(image, origin_xy, vec_xy, color=(0,255,0), scale=100, thickness=2):
     p1 = tuple(np.round(origin_xy).astype(int))
     p2 = tuple(np.round(origin_xy + vec_xy * scale).astype(int))
     cv2.arrowedLine(image, p1, p2, color, thickness, tipLength=0.3)
 
+def draw_body_forward(image, center_xy, forward_vec_xz, scale=100, color=(255,0,255)):
+    vec_xy = np.array([forward_vec_xz[0], forward_vec_xz[2]])
+    draw_arrow(image, np.array(center_xy), vec_xy, color=color, scale=scale, thickness=3)
 
-def inout_draw_arrow_points(image, start_xy, end_xy, color, thickness=3):
-    cv2.arrowedLine(image, tuple(map(int, start_xy)), tuple(map(int, end_xy)), color, thickness, tipLength=0.18)
-
-
-def inout_draw_arc(frame, heel_pos, ankle_pos, knee_pos, toe_pos, angle, status, label, curve_factor=0.3):
-    foot_midpoint = np.array([(heel_pos[0] + toe_pos[0]) / 2.0, (heel_pos[1] + toe_pos[1]) / 2.0], dtype=float)
-    foot_length = float(np.hypot(toe_pos[0] - heel_pos[0], toe_pos[1] - heel_pos[1]))
-    half_foot_length = max(foot_length / 2.0, 1.0)
-
-    shank_vec = np.array([ankle_pos[0] - knee_pos[0], ankle_pos[1] - knee_pos[1]], dtype=float)
-    shank_vec_normalized = normalize_vector(shank_vec)
-    shank_midpoint = np.array([
-        ankle_pos[0] - shank_vec_normalized[0] * half_foot_length,
-        ankle_pos[1] - shank_vec_normalized[1] * half_foot_length,
-    ], dtype=float)
-
-    if status == 'Normal':
-        line_color = (0, 255, 0)
-    else:
-        line_color = (0, 0, 255)
-
-    mid_x = (foot_midpoint[0] + shank_midpoint[0]) / 2.0
-    mid_y = (foot_midpoint[1] + shank_midpoint[1]) / 2.0
-    dx = shank_midpoint[0] - foot_midpoint[0]
-    dy = shank_midpoint[1] - foot_midpoint[1]
-    perpendicular = normalize_vector(np.array([-dy, dx], dtype=float))
-
-    angle_factor = abs(angle) / 30.0
-    total_curve_factor = curve_factor + angle_factor * 0.5
-    curve_offset = half_foot_length * total_curve_factor
-    if label == 'R':
-        curve_offset = -curve_offset
-
-    control_x = mid_x + perpendicular[0] * curve_offset
-    control_y = mid_y + perpendicular[1] * curve_offset
-
-    pts = []
-    for t in np.linspace(0.0, 1.0, 30):
-        x = (1 - t) * (1 - t) * foot_midpoint[0] + 2 * (1 - t) * t * control_x + t * t * shank_midpoint[0]
-        y = (1 - t) * (1 - t) * foot_midpoint[1] + 2 * (1 - t) * t * control_y + t * t * shank_midpoint[1]
-        pts.append((int(round(x)), int(round(y))))
-    cv2.polylines(frame, [np.array(pts, dtype=np.int32)], False, line_color, 4, cv2.LINE_AA)
-    cv2.circle(frame, tuple(np.round(foot_midpoint).astype(int)), 5, line_color, -1)
-    cv2.circle(frame, tuple(np.round(shank_midpoint).astype(int)), 5, line_color, -1)
-
-    angle_text = f'{label} {abs(angle):.1f} deg'
-    cv2.putText(frame, angle_text, (int(control_x - 20), int(control_y - 5)), FONT, 0.7, line_color, 2, cv2.LINE_AA)
-
-
-def analyze_inout_frame(lm, prev: Optional[Dict[str, Any]] = None, th: Optional[Dict[str, float]] = None):
+def analyze_inout_frame(lm, prev: Optional[Dict[str,Any]] = None,
+                        th: Optional[Dict[str,float]] = None) -> Tuple[Dict[str,Any], Dict[str,Any]]:
+    if th is None:
+        th = {"high": 8.0, "low": 3.0, "ema": 0.18, "hip_rot": 15.0}  # 穩定一點的 EMA
     if prev is None:
-        prev = {'analyzer': InOutFootAngleAnalyzer(view_angle=VIEW_ANGLE_FRONT)}
-    analyzer = prev.get('analyzer')
-    if analyzer is None:
-        analyzer = InOutFootAngleAnalyzer(view_angle=VIEW_ANGLE_FRONT)
-        prev['analyzer'] = analyzer
-    keypoints = extract_inout_keypoints(lm, 1000, 1000)
-    analysis = analyzer.analyze(keypoints)
-    return analysis, prev
+        prev = {"left_leg":"Neutral","right_leg":"Neutral",
+                "ema_angle":{"left":None,"right":None},
+                "bf_vec":None,"hip_trace":deque(maxlen=15)}
+    hip_l, hip_r = lm[23], lm[24]
+    hip_center = np.array([(hip_l.x+hip_r.x)/2.0, (hip_l.y+hip_r.y)/2.0, (hip_l.z+hip_r.z)/2.0], float)
+    hip_xz = hip_center[[0,2]]
+    prev["hip_trace"].append(hip_xz)
+    if len(prev["hip_trace"]) >= 2:
+        delta = prev["hip_trace"][-1] - prev["hip_trace"][-2]
+        if np.linalg.norm(delta) > 1e-3:
+            bf = _normalize(np.array([delta[0], 0.0, delta[1]], float))
+            prev["bf_vec"] = bf
+        else:
+            bf = prev["bf_vec"] if prev["bf_vec"] is not None else np.array([1.0,0.0,0.0])
+    else:
+        bf = np.array([1.0,0.0,0.0])
+    result = {}
+    for side, idxs in (("left",(29,31)), ("right",(30,32))):
+        heel = lm[idxs[0]]; toe = lm[idxs[1]]
+        foot_vec_raw = np.array([toe.x-heel.x, toe.y-heel.y, toe.z-heel.z], float)
+        foot_proj = _normalize(np.array([foot_vec_raw[0], 0.0, foot_vec_raw[2]]))
+        raw = prev["ema_angle"][side] or 0.0 if (np.linalg.norm(bf)<1e-5 or np.linalg.norm(foot_proj)<1e-5) \
+              else _ang(foot_proj, bf)
+        alpha = th["ema"]; prev_val = prev["ema_angle"][side]
+        ema = raw if prev_val is None else alpha*raw + (1-alpha)*prev_val
+        prev["ema_angle"][side] = ema
+        if prev.get(f"{side}_leg") == "In-Toed":
+            label = "In-Toed" if ema < th["low"] else "Neutral"
+        elif prev.get(f"{side}_leg") == "Out-Toed":
+            label = "Out-Toed" if ema > th["high"] else "Neutral"
+        else:
+            label = "In-Toed" if ema < th["low"] else ("Out-Toed" if ema > th["high"] else "Neutral")
+        prev[f"{side}_leg"] = label
+        knee = lm[25 if side=="left" else 26]
+        hip  = lm[23 if side=="left" else 24]
+        thigh = np.array([knee.x-hip.x, knee.y-hip.y, knee.z-hip.z], float)
+        thigh_proj = _normalize(np.array([thigh[0], 0.0, thigh[2]]))
+        hip_rot_angle = _ang(thigh_proj, bf)
+        hip_rot_status = "Internally Rotated" if hip_rot_angle > th["hip_rot"] else "Neutral"
+        result[f"{side}_leg"] = {
+            "status": label,
+            "foot_angle_deg": round(ema, 2),
+            "hip_rotation_deg": round(hip_rot_angle, 2),
+            "hip_rotation_status": hip_rot_status,
+            "heel_xy": (heel.x, heel.y),
+            "toe_xy":  (toe.x,  toe.y),
+        }
+    result["bf_vec"] = bf
+    result["hip_center_xy"] = ((hip_l.x+hip_r.x)/2.0, (hip_l.y+hip_r.y)/2.0)
+    return result, prev
+
+def build_inout_lines(L:dict, R:dict) -> list[str]:
+    return [
+        f"Left  status : {L.get('status','--')}",
+        f"Left  foot   : {L.get('foot_angle_deg',0):.2f}",
+        f"Left  hipRot : {L.get('hip_rotation_deg',0):.2f}",
+        "",
+        f"Right status : {R.get('status','--')}",
+        f"Right foot   : {R.get('foot_angle_deg',0):.2f}",
+        f"Right hipRot : {R.get('hip_rotation_deg',0):.2f}",
+    ]
 
 # ========================= XO（X/O 型腿） =========================
 O_LEG_KNEE_THRESHOLD_CM = 6.0
@@ -553,12 +312,8 @@ def classify_video(video_path: str) -> str:
 
         # ---- In/Out 指標 ----
         analysis, inout_prev = analyze_inout_frame(lm2d, prev=inout_prev)
-        any_inout = False
-        if analysis is not None:
-            any_inout = ('Normal' not in analysis["left"]["status"] ) or ('Normal' not in analysis["right"]["status"] ) or \
-                        (analysis.get("left", {}).get("knee_status") not in (None, 'Normal')) or \
-                        (analysis.get("right", {}).get("knee_status") not in (None, 'Normal')) or \
-                        (analysis.get("crossover_angle") is not None and analysis.get("crossover_angle") < 0)
+        any_inout = (analysis["left_leg"]["status"]  != "Neutral") or \
+                    (analysis["right_leg"]["status"] != "Neutral")
 
         # ---- XO 指標 ----
         pts = _leg_points_from_lm(lm2d)
@@ -786,171 +541,84 @@ class HKAViewer(QtWidgets.QMainWindow):
         self.pose.close()
         QtWidgets.QMessageBox.information(self, "完成", "播放完畢！"); QtWidgets.qApp.quit()
 
-# ========================= In-Out-Toeing Viewer（左上面板；移植 main_3_gui.py 顯示方式） =========================
+# ========================= In-Out-Toeing Viewer（左上面板） =========================
 class InOutViewer(QtWidgets.QMainWindow):
     def __init__(self, video_path: str, out_path: Optional[str], text_px: int):
         super().__init__()
         self.text_px = max(8, int(text_px))
         self.cap = cv2.VideoCapture(video_path)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"無法開啟影片：{video_path}")
-        self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30
-        self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        if not self.cap.isOpened(): raise RuntimeError(f"無法開啟影片：{video_path}")
+        self.fps    = self.cap.get(cv2.CAP_PROP_FPS) or 30
+        self.width  = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.resize(self.width, self.height)
         self.writer = None
         if out_path:
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             self.writer = cv2.VideoWriter(out_path, fourcc, self.fps, (self.width, self.height))
-        self.label = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
-        self.setCentralWidget(self.label)
+        self.label = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter); self.setCentralWidget(self.label)
         self.pose = mp_pose.Pose(static_image_mode=False, model_complexity=2,
                                  min_detection_confidence=0.6, min_tracking_confidence=0.6,
                                  smooth_landmarks=True)
-        self.analyzer = InOutFootAngleAnalyzer(view_angle=VIEW_ANGLE_FRONT)
-        self.curve_factor = 0.3
-        self.timer = QtCore.QTimer(self)
-        self.timer.timeout.connect(self._next_frame)
+        self.prev = None
+        self.timer = QtCore.QTimer(self); self.timer.timeout.connect(self._next_frame)
         self.timer.start(int(1000 / self.fps))
-
-    def _draw_info_panel_like_main3(self, frame, analysis_result):
-        left_data = analysis_result['left']
-        right_data = analysis_result['right']
-        crossover_angle = analysis_result.get('crossover_angle')
-
-        def foot_line(side_name, data):
-            angle_text = f"{data['angle']:.1f} deg" if data.get('angle') is not None else '--'
-            status_text = data.get('status') or 'Unknown'
-            return f"{side_name} foot: {angle_text} ({status_text})", inout_get_status_color(status_text)
-
-        def knee_line(side_name, data):
-            if data.get('knee_angle') is None:
-                return f"{side_name} knee: --", (150, 150, 150)
-            return f"{side_name} knee: {data['knee_angle']:.1f} deg ({data['knee_status']})", inout_get_knee_color(data['knee_status'])
-
-        left_knee_in = ((left_data['knee_status'] == 'Knee inward') or ('In-toeing' in left_data['status']))
-        right_knee_in = ((right_data['knee_status'] == 'Knee inward') or ('In-toeing' in right_data['status']))
-        left_foot_out = ('Out-toeing' in left_data['status']) if left_data['status'] is not None else False
-        right_foot_out = ('Out-toeing' in right_data['status']) if right_data['status'] is not None else False
-        crossover_triggered = (crossover_angle is not None and crossover_angle < 0)
-        is_in_toeing = left_knee_in or right_knee_in or crossover_triggered
-        is_out_toeing = left_foot_out or right_foot_out
-
-        if is_in_toeing and is_out_toeing:
-            final_text = 'Overall: In-toeing / Out-toeing'
-            final_color = (0, 0, 255)
-        elif is_in_toeing:
-            final_text = 'Overall: In-toeing'
-            final_color = (0, 0, 255)
-        elif is_out_toeing:
-            final_text = 'Overall: Out-toeing'
-            final_color = (0, 0, 255)
-        else:
-            final_text = 'Overall: Normal'
-            final_color = (0, 255, 0)
-
-        if crossover_angle is not None and crossover_angle < 0:
-            cross_text = f'Foot crossing: {crossover_angle:.1f} deg'
-            cross_color = (0, 0, 255) if crossover_angle < -10 else (0, 165, 255)
-        else:
-            cross_text = 'Foot crossing: None'
-            cross_color = (150, 150, 150)
-
-        lines_and_colors = [
-            foot_line('Left', left_data),
-            knee_line('Left', left_data),
-            foot_line('Right', right_data),
-            knee_line('Right', right_data),
-            (cross_text, cross_color),
-            (final_text, final_color),
-        ]
-        lines = [t for t, _ in lines_and_colors]
-        colors = [c for _, c in lines_and_colors]
-
-        fs, line_h, pad = fixed_font_metrics(self.text_px)
-        h, w = frame.shape[:2]
-        max_box_w = int(w * 0.62)
-        min_fs = 0.38
-        while True:
-            text_sizes = [cv2.getTextSize(t, FONT, fs, HUD_TEXT_THICK)[0] for t in lines]
-            box_w = max((tw for tw, th in text_sizes), default=200) + pad * 2
-            if box_w <= max_box_w or fs <= min_fs:
-                break
-            fs *= 0.92
-            line_h = max(16, int(line_h * 0.94))
-            pad = max(8, int(pad * 0.96))
-
-        box_h = pad * 2 + line_h * len(lines)
-        x0, y0 = 12, 12
-        box_w = min(box_w, w - x0 - 12)
-        box_h = min(box_h, h - y0 - 12)
-
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (x0, y0), (x0 + box_w, y0 + box_h), PANEL_BG_COLOR, -1)
-        cv2.addWeighted(overlay, PANEL_ALPHA, frame, 1 - PANEL_ALPHA, 0, frame)
-
-        y = y0 + pad + line_h - int(line_h * 0.3)
-        for text, color in zip(lines, colors):
-            cv2.putText(frame, text, (x0 + pad, y), FONT, fs, color, HUD_TEXT_THICK, cv2.LINE_AA)
-            y += line_h
 
     def _next_frame(self):
         ok, frame = self.cap.read()
-        if not ok:
-            self._finish()
-            return
-
+        if not ok: self._finish(); return
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         res = self.pose.process(rgb)
         if res.pose_landmarks:
             lm = res.pose_landmarks.landmark
-            keypoints = extract_inout_keypoints(lm, self.width, self.height)
-            analysis = self.analyzer.analyze(keypoints)
 
-            if analysis is not None:
-                cv2.line(frame, keypoints['left_hip_2d'], keypoints['left_knee_2d'], (0, 150, 255), 3)
-                cv2.line(frame, keypoints['right_hip_2d'], keypoints['right_knee_2d'], (0, 150, 255), 3)
-                cv2.line(frame, keypoints['left_knee_2d'], keypoints['left_ankle_2d'], (150, 150, 150), 2)
-                cv2.line(frame, keypoints['right_knee_2d'], keypoints['right_ankle_2d'], (150, 150, 150), 2)
+            # === 畫出全身骨架關鍵點與連線（使用預設樣式，避免版本相容性問題） ===
+            mp_drawing.draw_landmarks(
+                frame,
+                res.pose_landmarks,
+                mp_pose.POSE_CONNECTIONS
+            )
 
-                cv2.circle(frame, keypoints['left_heel_2d'], 10, (255, 0, 0), -1)
-                cv2.circle(frame, keypoints['right_heel_2d'], 10, (255, 0, 0), -1)
-                cv2.circle(frame, keypoints['left_toe_2d'], 10, (0, 0, 255), -1)
-                cv2.circle(frame, keypoints['right_toe_2d'], 10, (0, 0, 255), -1)
-                cv2.circle(frame, keypoints['left_hip_2d'], 8, (0, 255, 255), -1)
-                cv2.circle(frame, keypoints['right_hip_2d'], 8, (0, 255, 255), -1)
-                cv2.circle(frame, keypoints['left_knee_2d'], 8, (255, 255, 0), -1)
-                cv2.circle(frame, keypoints['right_knee_2d'], 8, (255, 255, 0), -1)
+            analysis, self.prev = analyze_inout_frame(lm, prev=self.prev)
+            h, w = frame.shape[:2]
+            for side, (heel_idx, toe_idx, color) in (
+                ("left", (29,31, (0,255,0))),
+                ("right",(30,32, (0,0,255))),
+            ):
+                heel = lm[heel_idx]; toe = lm[toe_idx]
+                heel_xy = np.array([heel.x*w, heel.y*h]);  toe_xy = np.array([toe.x*w, toe.y*h])
+                v = toe_xy - heel_xy;  v = v / (np.linalg.norm(v)+1e-6)
+                draw_arrow(frame, heel_xy, v, color=color, scale=100, thickness=2)
 
-                left_arrow_color = inout_get_status_color(analysis['left']['status'])
-                right_arrow_color = inout_get_status_color(analysis['right']['status'])
-                inout_draw_arrow_points(frame, keypoints['left_heel_2d'], keypoints['left_toe_2d'], left_arrow_color, 4)
-                inout_draw_arrow_points(frame, keypoints['right_heel_2d'], keypoints['right_toe_2d'], right_arrow_color, 4)
+            hc = analysis["hip_center_xy"]; bf = analysis["bf_vec"]
+            draw_body_forward(frame, (hc[0]*w, hc[1]*h), bf, scale=100, color=(255,0,255))
 
-                inout_draw_arc(
-                    frame,
-                    keypoints['left_heel_2d'], keypoints['left_ankle_2d'], keypoints['left_knee_2d'], keypoints['left_toe_2d'],
-                    analysis['left']['angle'], analysis['left']['status'], 'L', self.curve_factor,
-                )
-                inout_draw_arc(
-                    frame,
-                    keypoints['right_heel_2d'], keypoints['right_ankle_2d'], keypoints['right_knee_2d'], keypoints['right_toe_2d'],
-                    analysis['right']['angle'], analysis['right']['status'], 'R', self.curve_factor,
-                )
-                self._draw_info_panel_like_main3(frame, analysis)
-        if self.writer:
-            self.writer.write(frame)
+            # 左上面板（與其它模式同字級/透明度）
+            fs, line_h, pad = fixed_font_metrics(self.text_px)
+            lines = build_inout_lines(analysis["left_leg"], analysis["right_leg"])
+            is_match = (analysis["left_leg"]["status"] != "Neutral") or (analysis["right_leg"]["status"] != "Neutral")
+            text_color = passfail_color(is_match)
+
+            text_sizes = [cv2.getTextSize(t, FONT, fs, HUD_TEXT_THICK)[0] for t in lines]
+            max_w = max(wd for wd, hh in text_sizes)
+            box_w = max_w + pad*2;  box_h = pad*2 + line_h*len(lines)
+            x0, y0 = 10, 10
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (x0, y0), (x0+box_w, y0+box_h), PANEL_BG_COLOR, -1)
+            cv2.addWeighted(overlay, PANEL_ALPHA, frame, 1-PANEL_ALPHA, 0, frame)
+            y = y0 + pad + line_h - int(line_h*0.3)
+            for ln in lines:
+                cv2.putText(frame, ln, (x0+pad, y), FONT, fs, text_color, HUD_TEXT_THICK, cv2.LINE_AA)
+                y += line_h
+        if self.writer: self.writer.write(frame)
         qimg = QtGui.QImage(frame.data, frame.shape[1], frame.shape[0], frame.strides[0], QtGui.QImage.Format_BGR888)
         self.label.setPixmap(QtGui.QPixmap.fromImage(qimg))
 
     def _finish(self):
-        self.timer.stop()
-        self.cap.release()
-        if self.writer:
-            self.writer.release()
+        self.timer.stop(); self.cap.release()
+        if self.writer: self.writer.release()
         self.pose.close()
-        QtWidgets.QMessageBox.information(self, '完成', '播放完畢！')
-        QtWidgets.qApp.quit()
+        QtWidgets.QMessageBox.information(self, "完成", "播放完畢！"); QtWidgets.qApp.quit()
 
 # ========================= XO Viewer（左上面板；保留文字顏色） =========================
 class XOViewer(QtWidgets.QMainWindow):
